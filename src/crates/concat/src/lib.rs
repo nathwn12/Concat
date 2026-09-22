@@ -106,16 +106,32 @@ pub fn run() -> Result<(), slint::PlatformError> {
     // goes through the same `Studio::import` the Import menu uses, so a
     // dropped file gets the same probe, the same failure notice, and the
     // same "no project open yet" no-op that a picked one does.
-    let gpu = platform::select_backend(|paths| {
-        Shell::with(|shell, app| {
-            {
-                let mut studio = shell.studio.borrow_mut();
-                studio.handle(Msg::Media(MediaMsg::Import(paths)));
-            }
-            shell.studio.borrow_mut().refresh_art();
-            shell.studio.borrow().publish(&app, &shell.models);
-        });
-    })?;
+    let gpu = platform::select_backend(
+        |paths| {
+            Shell::with(|shell, app| {
+                {
+                    let mut studio = shell.studio.borrow_mut();
+                    studio.handle(Msg::Media(MediaMsg::Import(paths)));
+                }
+                shell.studio.borrow_mut().refresh_art();
+                shell.studio.borrow().publish(&app, &shell.models);
+            });
+        },
+        || {
+            // The launch form was published at the end of this function,
+            // before `App::run` mapped a window, so the Auto rung it drew
+            // was the fallback. The handler learns the real monitor from
+            // the window's first event; re-publish so the readout is the
+            // measurement and not the fallback. This fires only when the
+            // monitor changes - a move to another screen, a scale change -
+            // so it is not a repaint loop. `Shell::with` is a no-op until
+            // `Shell::install` runs, which is before any event can arrive.
+            Shell::with(|shell, app| {
+                shell.studio.borrow_mut().refresh_art();
+                shell.studio.borrow().publish(&app, &shell.models);
+            });
+        },
+    )?;
 
     let host = match Host::start(gpu) {
         Ok(host) => host,

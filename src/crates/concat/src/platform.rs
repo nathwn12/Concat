@@ -19,6 +19,8 @@
 //! event as of this winit, and not iOS, which has no such gesture.
 
 use std::path::PathBuf;
+#[cfg(not(target_os = "android"))]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use slint::PlatformError;
 // The winit backend, and so these, exist everywhere but Android, which
@@ -34,23 +36,90 @@ use slint::winit_030::{CustomApplicationHandler, EventResult};
 
 use crate::gpu::Gpu;
 
+/// The physical pixels of the last monitor a window was known to be on,
+/// `(width << 32) | height`, or 0 for "not seen yet".
+///
+/// A process-wide cell rather than a field on [`DropHandler`] because the
+/// reader - [`monitor_size`] - is a free function with no handle to the
+/// handler: `select_backend` takes the handler and winit keeps it, while
+/// the launch form calls `monitor_size` from elsewhere. `AtomicU64` over an
+/// `Rc<Cell<..>>` because it needs no ownership to reach and no thread to
+/// agree on: it is a plain const-initialised static, which is the shape
+/// `FILE_PICKER` below already uses for process-wide platform state.
+#[cfg(not(target_os = "android"))]
+static MONITOR: AtomicU64 = AtomicU64::new(0);
+
+/// Packs a measured monitor into [`MONITOR`]'s cell.
+#[cfg(not(target_os = "android"))]
+fn pack_monitor(size: (u32, u32)) -> u64 {
+    (u64::from(size.0) << 32) | u64::from(size.1)
+}
+
+/// Unpacks [`MONITOR`]'s cell; 0 - never seen - is `None`. Desktop only:
+/// it is read by [`monitor_size`], whose phone branch has no window to read
+/// a monitor from.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn unpack_monitor(bits: u64) -> Option<(u32, u32)> {
+    (bits != 0).then(|| ((bits >> 32) as u32, bits as u32))
+}
+
 /// Collects the paths of a single OS drag as `DroppedFile` events deliver
 /// them one at a time, then hands the whole batch to `on_dropped` once
 /// winit says this pass over the event queue is done - the same shape a
 /// picked-files dialog hands the caller, so the caller need not know drag
 /// and drop split it up.
+///
+/// It is also the only place the window's monitor is seen: the launch form
+/// is published before `App::run` maps a window, so `monitor_size` has
+/// nothing to read then, and this handler - handed the winit window on its
+/// every event - is where the real measurement comes from. `on_monitor`
+/// fires when that measurement changes, so the caller can re-publish.
 #[cfg(not(target_os = "android"))]
 struct DropHandler {
     pending: Vec<PathBuf>,
     on_dropped: Box<dyn Fn(Vec<PathBuf>)>,
+    on_monitor: Box<dyn Fn()>,
+    seen_monitor: bool,
 }
 
 #[cfg(not(target_os = "android"))]
 impl DropHandler {
-    fn new(on_dropped: impl Fn(Vec<PathBuf>) + 'static) -> Self {
+    fn new(
+        on_dropped: impl Fn(Vec<PathBuf>) + 'static,
+        on_monitor: impl Fn() + 'static,
+    ) -> Self {
         Self {
             pending: Vec::new(),
             on_dropped: Box::new(on_dropped),
+            on_monitor: Box::new(on_monitor),
+            seen_monitor: false,
+        }
+    }
+
+    /// Records the monitor of the window this event came from, and calls
+    /// back only when it differs from what was last recorded - a resize, a
+    /// move to another screen or a scale change is a new measurement, and
+    /// every other event is a chance to take the first one. A window with
+    /// no monitor yet (unmapped, hidden) records nothing, so the fallback
+    /// survives until a real size is known.
+    fn learn_monitor(&mut self, window: Option<&WinitWindow>) {
+        let Some(size) = window
+            .and_then(|window| window.current_monitor())
+            .map(|monitor| {
+                let size = monitor.size();
+                (size.width, size.height)
+            })
+        else {
+            return;
+        };
+        if size.0 == 0 || size.1 == 0 {
+            return;
+        }
+        let bits = pack_monitor(size);
+        let previous = MONITOR.swap(bits, Ordering::Relaxed);
+        if !self.seen_monitor || previous != bits {
+            self.seen_monitor = true;
+            (self.on_monitor)();
         }
     }
 }
@@ -61,12 +130,20 @@ impl CustomApplicationHandler for DropHandler {
         &mut self,
         _event_loop: &ActiveEventLoop,
         _window_id: WindowId,
-        _winit_window: Option<&WinitWindow>,
+        winit_window: Option<&WinitWindow>,
         _slint_window: Option<&slint::Window>,
         event: &WindowEvent,
     ) -> EventResult {
-        if let WindowEvent::DroppedFile(path) = event {
-            self.pending.push(path.clone());
+        match event {
+            WindowEvent::DroppedFile(path) => self.pending.push(path.clone()),
+            // The events that can change which monitor the window is on.
+            WindowEvent::Resized(_)
+            | WindowEvent::Moved(_)
+            | WindowEvent::ScaleFactorChanged { .. } => self.learn_monitor(winit_window),
+            // ...and the first event of any kind, so the measurement is
+            // taken as soon as a window exists to take it from.
+            _ if !self.seen_monitor => self.learn_monitor(winit_window),
+            _ => {}
         }
         EventResult::Propagate
     }
@@ -91,9 +168,15 @@ pub const MACOS: bool = cfg!(target_os = "macos");
 /// before the window exists, because the backend - and the hook into its
 /// event loop that OS drops arrive through - has to be selected before
 /// anything is built on top of it; see [`DropHandler`].
+///
+/// `on_monitor_changed` fires on that same thread when the window's monitor
+/// is first known or changes. The window is where the monitor is measured
+/// (see [`monitor_size`]), and it does not exist yet at this point, so the
+/// caller gets told when it does and can refresh what it published.
 #[cfg(not(target_os = "android"))]
 pub fn select_backend(
     on_files_dropped: impl Fn(Vec<PathBuf>) + 'static,
+    on_monitor_changed: impl Fn() + 'static,
 ) -> Result<Option<Gpu>, PlatformError> {
     // The device the renderer and the monitor share. Taken first, because
     // the backend is selected with it.
@@ -121,7 +204,10 @@ pub fn select_backend(
 
     let mut selector = slint::BackendSelector::new()
         .backend_name("winit".into())
-        .with_winit_custom_application_handler(DropHandler::new(on_files_dropped));
+        .with_winit_custom_application_handler(DropHandler::new(
+            on_files_dropped,
+            on_monitor_changed,
+        ));
     selector = match &gpu {
         Some(gpu) => selector.require_wgpu_29(gpu.configuration()),
         None => {
@@ -256,12 +342,16 @@ pub fn is_maximized(window: &slint::Window) -> bool {
 /// CPU and hands the renderer finished pixels. Android has no OS drag to
 /// wire up - a file arrives through the document picker instead - so
 /// `on_files_dropped` is taken only to keep the signature the same as the
-/// desktop's and is never called.
+/// desktop's and is never called. `on_monitor_changed` is the same: Android
+/// has no winit window to measure a monitor from, so it is never called
+/// either.
 #[cfg(target_os = "android")]
 pub fn select_backend(
     on_files_dropped: impl Fn(Vec<PathBuf>) + 'static,
+    on_monitor_changed: impl Fn() + 'static,
 ) -> Result<Option<Gpu>, PlatformError> {
     let _ = on_files_dropped;
+    let _ = on_monitor_changed;
     Ok(None)
 }
 
@@ -430,23 +520,60 @@ pub fn auto_resolution(monitor: Option<(u32, u32)>, rungs: &[(u32, u32)]) -> (u3
 /// The physical pixels of the window's current monitor, when the platform
 /// can say. `None` before the window is mapped, on a phone, or on a
 /// platform without winit.
+///
+/// The measurement taken from a real window, by the event handler, comes
+/// first: the launch form is published before `App::run` maps a window, so
+/// the accessor has nothing to read at that moment and the handler's record
+/// is the only measurement there is. The accessor is the fallback, for a
+/// window the handler has not seen an event from yet.
 pub fn monitor_size(window: &slint::Window) -> Option<(u32, u32)> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         use slint::winit_030::WinitWindowAccessor;
-        window
-            .with_winit_window(|window| {
-                window.current_monitor().map(|monitor| {
-                    let size = monitor.size();
-                    (size.width, size.height)
+        let size = unpack_monitor(MONITOR.load(Ordering::Relaxed)).or_else(|| {
+            window
+                .with_winit_window(|window| {
+                    window.current_monitor().map(|monitor| {
+                        let size = monitor.size();
+                        (size.width, size.height)
+                    })
                 })
-            })
-            .flatten()
+                .flatten()
+        });
+        log_monitor(window, size);
+        size
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let _ = window;
         None
+    }
+}
+
+/// One line per change, not per call: the resolved monitor and whether the
+/// Slint window has a winit window behind it yet. The launch readout is
+/// published before `App::run` maps one, so a run's first line records the
+/// `None` that produced the fallback rung, and the next records what the
+/// window actually has - which is how a stale readout is told from a
+/// correct one. It lives here rather than on one caller because both the
+/// publish path and the create a user clicks through read the monitor
+/// through this function.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn log_monitor(window: &slint::Window, size: Option<(u32, u32)>) {
+    use slint::winit_030::WinitWindowAccessor;
+    static LOGGED: AtomicU64 = AtomicU64::new(0);
+    // 0 is "nothing logged yet"; `None` and a real size are told apart by
+    // the top bit, which a packed (width, height) cannot set on its own
+    // for a monitor a desk would have.
+    let bits = match size {
+        None => 1,
+        Some(size) => pack_monitor(size) | (1 << 63),
+    };
+    if LOGGED.swap(bits, Ordering::Relaxed) != bits {
+        log::info!(
+            "monitor: has_winit_window={} size={size:?}",
+            window.has_winit_window()
+        );
     }
 }
 
