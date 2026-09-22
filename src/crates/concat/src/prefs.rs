@@ -55,6 +55,15 @@ pub struct Preferences {
     /// The Concat API on a socket while the window is open.
     #[serde(default)]
     pub server: ServerPrefs,
+    /// New projects take the monitor's size. `None` is on; off, the
+    /// launch list starts at 1080p.
+    #[serde(default)]
+    pub auto_resolution: Option<bool>,
+    /// The launch screen's frame rate. `None` is 30/1.
+    #[serde(default)]
+    pub default_rate_num: Option<i64>,
+    #[serde(default)]
+    pub default_rate_den: Option<i64>,
 }
 
 impl Preferences {
@@ -63,6 +72,21 @@ impl Preferences {
     pub fn hardware_decode_on(&self) -> bool {
         self.hardware_decode
             .unwrap_or(cfg!(any(target_os = "macos", target_os = "ios")))
+    }
+
+    /// Whether a new project takes the monitor's size: the choice made,
+    /// or on when none was.
+    pub fn auto_resolution_on(&self) -> bool {
+        self.auto_resolution.unwrap_or(true)
+    }
+
+    /// The launch screen's default frame rate: the choice made, or 30/1
+    /// when none was.
+    pub fn default_rate(&self) -> (i64, i64) {
+        (
+            self.default_rate_num.unwrap_or(30),
+            self.default_rate_den.unwrap_or(1),
+        )
     }
 }
 

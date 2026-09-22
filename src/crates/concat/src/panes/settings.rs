@@ -23,7 +23,7 @@ use crate::i18n::{self, t, tf};
 use crate::panes::Msg;
 use crate::platform;
 use crate::prefs;
-use crate::studio::Studio;
+use crate::studio::{START_RATES, Studio};
 use crate::ui::{ModelData, SettingsData};
 
 /// Everything that can happen to the settings sheet.
@@ -42,6 +42,11 @@ pub enum SettingsMsg {
     CustomContextActionsChanged(bool),
     /// The magnetic timeline switch; the tray's button is the same fact.
     MagneticChanged(bool),
+    /// New projects take the monitor's size.
+    AutoResolutionChanged(bool),
+    /// The launch screen's default frame rate, as an index into the
+    /// rate list.
+    DefaultRateChanged(i32),
     HardwareDecodeChanged(bool),
     DownloadSourceChanged(i32),
     DownloadBaseEdited(String),
@@ -221,6 +226,23 @@ impl SettingsPane {
             SettingsMsg::MagneticChanged(on) => {
                 studio.prefs.magnetic = on;
                 studio.prefs.save(&studio.host.dirs);
+            }
+            SettingsMsg::AutoResolutionChanged(on) => {
+                studio.prefs.auto_resolution = Some(on);
+                studio.prefs.save(&studio.host.dirs);
+                // The launch form is re-seeded from the preference: the
+                // settings sheet is the one truth of a default, and the
+                // launch screen's own choices are per-project and never
+                // written back.
+                studio.start = crate::panes::start::StartPane::new(&studio.prefs);
+            }
+            SettingsMsg::DefaultRateChanged(index) => {
+                let index = (index.max(0) as usize).min(START_RATES.len() - 1);
+                let (_, num, den) = START_RATES[index];
+                studio.prefs.default_rate_num = Some(num);
+                studio.prefs.default_rate_den = Some(den);
+                studio.prefs.save(&studio.host.dirs);
+                studio.start = crate::panes::start::StartPane::new(&studio.prefs);
             }
             SettingsMsg::HardwareDecodeChanged(on) => {
                 self.hardware_decode = on;
@@ -558,6 +580,14 @@ impl SettingsPane {
             playhead_stops: self.playhead_stops,
             custom_context_actions: self.custom_context_actions,
             magnetic: studio.prefs.magnetic,
+            auto_resolution: studio.prefs.auto_resolution_on(),
+            default_rate: {
+                let (num, den) = studio.prefs.default_rate();
+                START_RATES
+                    .iter()
+                    .position(|(_, n, d)| (*n, *d) == (num, den))
+                    .unwrap_or(3) as i32
+            },
             hardware_decode: self.hardware_decode,
             hardware_decode_offered: concat_media::HwDevice::platform_default()
                 .is_some_and(concat_media::HwDevice::linked),

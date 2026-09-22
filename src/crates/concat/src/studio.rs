@@ -160,10 +160,13 @@ pub(crate) const EXPORT_CRF: [u8; 3] = [16, 20, 26];
 pub(crate) const AUDIO_BPS: f32 = 192_000.0;
 
 /// The frame sizes the launch screen offers, and what each label means.
-pub const RESOLUTIONS: [(&str, u32, u32); 4] = [
+/// Index 0 stays 1080p: the launch form defaults to it, and the Auto
+/// resolver falls back to it when no monitor is measurable.
+pub const RESOLUTIONS: [(&str, u32, u32); 5] = [
     ("1080p", 1920, 1080),
     ("720p", 1280, 720),
     ("4K", 3840, 2160),
+    ("2K", 2560, 1440),
     ("Vertical", 1080, 1920),
 ];
 
@@ -1264,6 +1267,9 @@ impl Studio {
         let languages = i18n::languages(&host.dirs);
         let recents = projects::list(&host.dirs.config);
         let text_presets = presets::all(&host.dirs);
+        // The launch form's defaults, read from the same preferences the
+        // Settings sheet writes: Auto resolution and the chosen frame rate.
+        let start = crate::panes::start::StartPane::new(&prefs);
         let mut studio = Self {
             prefs,
             library: Default::default(),
@@ -1296,7 +1302,7 @@ impl Studio {
             menu_token: 0,
             toast: ToastState::default(),
             on_start: true,
-            start: crate::panes::start::StartPane::default(),
+            start,
             recents,
             posters: HashMap::new(),
             posters_pending: HashSet::new(),
@@ -6315,7 +6321,7 @@ impl Studio {
             message: self.toast.message.as_str().into(),
             failed: self.toast.failed,
         });
-        app.set_start(self.start.data());
+        app.set_start(self.start.data(crate::platform::monitor_size(app.window())));
         sync(
             &models.recents,
             self.recents

@@ -8,6 +8,7 @@ use concat_host::projects;
 
 use crate::i18n::t;
 use crate::platform;
+use crate::prefs::Preferences;
 use crate::studio::{RESOLUTIONS, START_RATES, Studio, home_folder};
 use crate::ui::StartData;
 
@@ -21,7 +22,10 @@ pub enum StartMsg {
     DismissError,
     /// Pick where the project folder goes.
     Browse,
-    Create,
+    /// Make the project the form describes. The monitor size travels with
+    /// the message so Auto resolves against the window's current monitor,
+    /// at create time.
+    Create(Option<(u32, u32)>),
     OpenRecent(String),
     ForgetRecent(String),
 }
@@ -40,8 +44,6 @@ impl Default for StartPane {
     fn default() -> Self {
         Self {
             name: "Untitled project".into(),
-            // A phone has no desk: its projects live at the top of the
-            // folder the file manager shows for the app.
             location: home_folder(if cfg!(target_os = "android") {
                 "Concat"
             } else {
@@ -56,6 +58,30 @@ impl Default for StartPane {
 }
 
 impl StartPane {
+    /// The form with the remembered defaults: Auto resolution while the
+    /// settings say so — otherwise the first real rung, 1080p — and the
+    /// chosen default frame rate.
+    pub fn new(prefs: &Preferences) -> Self {
+        let (num, den) = prefs.default_rate();
+        Self {
+            name: "Untitled project".into(),
+            // A phone has no desk: its projects live at the top of the
+            // folder the file manager shows for the app.
+            location: home_folder(if cfg!(target_os = "android") {
+                "Concat"
+            } else {
+                "Desktop/Concat"
+            }),
+            resolution: if prefs.auto_resolution_on() { 0 } else { 1 },
+            rate: START_RATES
+                .iter()
+                .position(|(_, n, d)| *n == num && *d == den)
+                .unwrap_or(3),
+            busy: false,
+            error: String::new(),
+        }
+    }
+
     /// Applies one message. The studio is the rest of the window; while
     /// this runs the studio's copy of the pane is a blank it must not read.
     pub fn update(&mut self, msg: StartMsg, studio: &mut Studio) {
@@ -63,7 +89,7 @@ impl StartPane {
             StartMsg::NameEdited(name) => self.name = name,
             StartMsg::LocationEdited(path) => self.location = path,
             StartMsg::ResolutionChanged(index) => {
-                self.resolution = (index.max(0) as usize).min(RESOLUTIONS.len() - 1);
+                self.resolution = (index.max(0) as usize).min(RESOLUTIONS.len());
             }
             StartMsg::RateChanged(index) => {
                 self.rate = (index.max(0) as usize).min(START_RATES.len() - 1);
@@ -76,7 +102,7 @@ impl StartPane {
                     self.location = folder.to_string_lossy().into_owned();
                 }
             }
-            StartMsg::Create => self.create(studio),
+            StartMsg::Create(monitor) => self.create(studio, monitor),
             StartMsg::OpenRecent(path) => {
                 let opened = projects::open(&path).and_then(|info| studio.open_project(info));
                 self.opened(opened);
@@ -90,15 +116,32 @@ impl StartPane {
         }
     }
 
+    /// The frame the form describes: Auto resolved against the monitor's
+    /// current size, or the chosen rung. Auto is resolved here, before
+    /// anything is handed to `projects::create` — that function writes
+    /// width and height straight into the manifest, and no validation
+    /// guards it.
+    fn frame(&self, monitor: Option<(u32, u32)>) -> (u32, u32) {
+        let index = self.resolution.min(RESOLUTIONS.len());
+        if index == 0 {
+            let rungs: Vec<(u32, u32)> =
+                RESOLUTIONS.iter().map(|(_, width, height)| (*width, *height)).collect();
+            platform::auto_resolution(monitor, &rungs)
+        } else {
+            let (_, width, height) = RESOLUTIONS[index - 1];
+            (width, height)
+        }
+    }
+
     /// Makes the project the form describes and opens it.
-    fn create(&mut self, studio: &mut Studio) {
+    fn create(&mut self, studio: &mut Studio, monitor: Option<(u32, u32)>) {
         let name = self.name.trim().to_owned();
         let name = if name.is_empty() {
             "Untitled project".to_owned()
         } else {
             name
         };
-        let (_, width, height) = RESOLUTIONS[self.resolution.min(RESOLUTIONS.len() - 1)];
+        let (width, height) = self.frame(monitor);
         let (_, num, den) = START_RATES[self.rate.min(START_RATES.len() - 1)];
         if self.location.trim().is_empty() {
             self.error = t("Choose where the project folder should go");
@@ -118,9 +161,10 @@ impl StartPane {
         }
     }
 
-    /// The form as Slint shows it.
-    pub fn data(&self) -> StartData {
-        let (_, width, height) = RESOLUTIONS[self.resolution.min(RESOLUTIONS.len() - 1)];
+    /// The form as Slint shows it. `monitor` is the window's current
+    /// monitor, so an Auto choice reads as a concrete size.
+    pub fn data(&self, monitor: Option<(u32, u32)>) -> StartData {
+        let (width, height) = self.frame(monitor);
         let (_, num, den) = START_RATES[self.rate.min(START_RATES.len() - 1)];
         StartData {
             name: self.name.as_str().into(),

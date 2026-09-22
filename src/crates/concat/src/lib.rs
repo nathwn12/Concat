@@ -211,11 +211,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
     ))));
 
     // The ladders' labels, handed over once; the index the form reports back
-    // is what carries the meaning.
+    // is what carries the meaning. Resolution index 0 is Auto, so every rung
+    // in RESOLUTIONS sits one past its own position.
     app.set_start_resolutions(ModelRc::from(Rc::new(VecModel::from(
-        RESOLUTIONS
-            .iter()
-            .map(|(label, _, _)| SharedString::from(*label))
+        std::iter::once(SharedString::from("Auto"))
+            .chain(RESOLUTIONS.iter().map(|(label, _, _)| SharedString::from(*label)))
             .collect::<Vec<_>>(),
     ))));
     app.set_start_rates(ModelRc::from(Rc::new(VecModel::from(
@@ -359,9 +359,18 @@ pub fn run() -> Result<(), slint::PlatformError> {
     app.on_start_browse(on_window!(|state| {
         state.handle(Msg::Start(StartMsg::Browse));
     }));
-    app.on_start_create(on_window!(|state| {
-        state.handle(Msg::Start(StartMsg::Create));
-    }));
+    app.on_start_create({
+        // The macro's own closure cannot name the window, so the handle is
+        // taken here: the monitor is read at Create time, when the window
+        // is live, and Auto resolves against it.
+        let weak = app.as_weak();
+        on_window!(|state| {
+            let monitor = weak
+                .upgrade()
+                .and_then(|app| platform::monitor_size(app.window()));
+            state.handle(Msg::Start(StartMsg::Create(monitor)));
+        })
+    });
     app.on_start_open_recent(on_window!(|state, path: SharedString| {
         state.handle(Msg::Start(StartMsg::OpenRecent(path.to_string())));
     }));
@@ -1069,6 +1078,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
     }));
     app.on_settings_hardware_decode_changed(on_window!(|state, on: bool| {
         state.handle(Msg::Settings(SettingsMsg::HardwareDecodeChanged(on)));
+    }));
+    app.on_settings_auto_resolution_changed(on_window!(|state, on: bool| {
+        state.handle(Msg::Settings(SettingsMsg::AutoResolutionChanged(on)));
+    }));
+    app.on_settings_default_rate_changed(on_window!(|state, index: i32| {
+        state.handle(Msg::Settings(SettingsMsg::DefaultRateChanged(index)));
     }));
     app.on_settings_download_source_changed(on_window!(|state, index: i32| {
         state.handle(Msg::Settings(SettingsMsg::DownloadSourceChanged(index)));

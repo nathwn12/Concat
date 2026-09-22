@@ -76,6 +76,11 @@ export struct SettingsData {
     custom-context-actions: bool,
     /// the magnetic timeline: deleting and trimming close the gap
     magnetic: bool,
+    /// new projects take the monitor's size
+    auto-resolution: bool,
+    /// the launch screen's default frame rate, as an index into the
+    /// rate list
+    default-rate: int,
     /// video decodes on the platform's own hardware
     hardware-decode: bool,
     /// this build and machine have hardware to decode on; off, the
@@ -389,6 +394,10 @@ export component SettingsDialog inherits Modal {
     /// The theme, chosen rather than flipped. A toggle in the strip could only
     /// say "the other one"; a page with two named options can say which one is
     /// on, which is the whole reason it moved in here.
+    /// How the window answers the General page's row on what a new project
+    /// should be.
+    callback auto-resolution-changed(on: bool);
+    callback default-rate-changed(rate: int);
     callback theme-changed(dark: bool);
     callback playhead-stops-changed(on: bool);
     callback custom-context-actions-changed(on: bool);
@@ -513,6 +522,48 @@ export component SettingsDialog inherits Modal {
                         options: root.languages;
                         current: root.data.language;
                         changed(index) => { root.language-changed(index); }
+                    }
+                }
+
+                // New projects match the window's monitor. Off, the launch
+                // list starts at 1080p.
+                DialogSection {
+                    title: I18n.t("New project resolution");
+                    hint: I18n.t("On, a new project takes the monitor's size — Auto on the launch screen. Off, new projects start at 1080p.");
+
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: I18n.t("Match new projects to the display");
+                            color: Theme.fg;
+                            font-size: Theme.fs;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Switch {
+                                checked: root.data.auto-resolution;
+                                toggled(on) => { root.auto-resolution-changed(on); }
+                            }
+                        }
+                    }
+                }
+
+                DialogSection {
+                    title: I18n.t("Default frame rate");
+                    hint: I18n.t("The launch screen's frame rate for a new project. Any project can still pick its own on the launch screen.");
+
+                    DialogRow {
+                        label: I18n.t("New projects");
+                        Select {
+                            options: ["24", "25", "29.97", "30", "60"];
+                            current: root.data.default-rate;
+                            changed(index) => { root.default-rate-changed(index); }
+                        }
                     }
                 }
 

@@ -390,3 +390,94 @@ pub fn reveal(path: &str) -> Result<(), String> {
         ))
     }
 }
+
+/// What a new project's frame should be when Auto is chosen: the
+/// monitor's physical pixels, kept as-is when they are plausible; the
+/// nearest standard `rungs` entry when they are not; and the first rung
+/// — 1080p — when there is no monitor to measure at all.
+///
+/// The rung list is the launch ladder's own, so an off-ladder size such
+/// as a 3440×1440 ultrawide stays exact, while a mis-measured size —
+/// a hidden window's default, a tearing-down monitor — is snapped back
+/// to something a video project can be.
+pub fn auto_resolution(monitor: Option<(u32, u32)>, rungs: &[(u32, u32)]) -> (u32, u32) {
+    let fallback = rungs.first().copied().unwrap_or((1920, 1080));
+    let Some((width, height)) = monitor else {
+        return fallback;
+    };
+    // No measure at all is the same as none: an unmapped or hidden window
+    // reports a zero size, and 1080p is the floor either way.
+    if width == 0 || height == 0 {
+        return fallback;
+    }
+    // A size with no room for a real desktop is a mis-measurement, not a
+    // monitor. Snap it to the nearest standard rung rather than let a
+    // stray 640×200 become a 640×200 project.
+    if width < 960 || height < 540 {
+        return rungs
+            .iter()
+            .min_by_key(|(w, h)| {
+                let dw = i64::from(*w) - i64::from(width);
+                let dh = i64::from(*h) - i64::from(height);
+                dw * dw + dh * dh
+            })
+            .copied()
+            .unwrap_or(fallback);
+    }
+    (width, height)
+}
+
+/// The physical pixels of the window's current monitor, when the platform
+/// can say. `None` before the window is mapped, on a phone, or on a
+/// platform without winit.
+pub fn monitor_size(window: &slint::Window) -> Option<(u32, u32)> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        use slint::winit_030::WinitWindowAccessor;
+        window
+            .with_winit_window(|window| {
+                window.current_monitor().map(|monitor| {
+                    let size = monitor.size();
+                    (size.width, size.height)
+                })
+            })
+            .flatten()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = window;
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auto_resolution;
+
+    /// The creation ladder, as it stands in studio.rs; a local copy so this
+    /// module stays a pure function of its arguments.
+    const RUNGS: [(u32, u32); 5] = [
+        (1920, 1080),
+        (1280, 720),
+        (3840, 2160),
+        (2560, 1440),
+        (1080, 1920),
+    ];
+
+    #[test]
+    fn a_plausible_monitor_stays_exact() {
+        assert_eq!(auto_resolution(Some((2560, 1440)), &RUNGS), (2560, 1440));
+        assert_eq!(auto_resolution(Some((3440, 1440)), &RUNGS), (3440, 1440));
+    }
+
+    #[test]
+    fn no_monitor_is_the_1080p_rung() {
+        assert_eq!(auto_resolution(None, &RUNGS), (1920, 1080));
+        assert_eq!(auto_resolution(Some((0, 0)), &RUNGS), (1920, 1080));
+    }
+
+    #[test]
+    fn an_implausible_size_snaps_to_the_nearest_rung() {
+        assert_eq!(auto_resolution(Some((640, 200)), &RUNGS), (1280, 720));
+    }
+}
