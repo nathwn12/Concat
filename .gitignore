@@ -56,3 +56,6 @@ desktop.ini
 # FFmpeg built for a phone by src/scripts/ffmpeg-mobile.sh: sources,
 # build trees and the installed prefixes, all machine-built.
 /src/vendor/
+# The staged Windows bundle, and the installer built from it (FORK.md).
+# Machine-built and large, so it is ignored for that reason.
+/stage/
