@@ -579,7 +579,7 @@ fn log_monitor(window: &slint::Window, size: Option<(u32, u32)>) {
 
 #[cfg(test)]
 mod tests {
-    use super::auto_resolution;
+    use super::{auto_resolution, pack_monitor, unpack_monitor};
 
     /// The creation ladder, as it stands in studio.rs; a local copy so this
     /// module stays a pure function of its arguments.
@@ -606,5 +606,29 @@ mod tests {
     #[test]
     fn an_implausible_size_snaps_to_the_nearest_rung() {
         assert_eq!(auto_resolution(Some((640, 200)), &RUNGS), (1280, 720));
+    }
+
+    /// Packing and unpacking are inverse: every size that reaches the cell
+    /// comes back whole, zero components and all - learn_monitor filters
+    /// zero sizes before storing them, but the cell itself must not care.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn packing_round_trips_a_monitor_size() {
+        for size in [(2560, 1440), (1920, 1080), (3440, 1440), (1920, 0), (0, 1080)] {
+            assert_eq!(unpack_monitor(pack_monitor(size)), Some(size));
+        }
+        // A fully zero size packs to the 0 sentinel itself, which is why
+        // learn_monitor filters zero sizes before storing them.
+        assert_eq!(pack_monitor((0, 0)), 0);
+    }
+
+    /// 0 in the cell means "no monitor seen yet", so it must unpick to
+    /// nothing - and no real size may pack to it, or the sentinel would
+    /// be mistaken for a monitor.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn the_zero_sentinel_is_never_a_packed_monitor() {
+        assert_eq!(unpack_monitor(0), None);
+        assert_ne!(pack_monitor((2560, 1440)), 0);
     }
 }
