@@ -48,6 +48,10 @@ desktop.ini
 .env
 .env.local
 
+# Local agent configuration
+/AGENTS.md
+/.opencode/
+
 # An FFmpeg development build unpacked locally for the linked engine
 # (headers + import libraries), pointed at with FFMPEG_DIR. Large and
 # machine-specific.
