@@ -70,6 +70,8 @@ export global Editor {
     in-out property <int> media-count-video;
     in-out property <int> media-count-audio;
     in-out property <int> media-count-images;
+    in-out property <int> media-count-speech;
+    in-out property <int> media-count-processed;
     in-out property <int> media-selected-count;
     in-out property <bool> importing;
 
@@ -85,6 +87,9 @@ export global Editor {
     callback media-remove(id: int);
     callback media-remove-selected();
     callback media-activate(id: int);
+    /// Right-click on a card in the bin: Rust fills `menu-items` for the
+    /// file and bumps `menu-token`, the same round trip as `clip-context`.
+    callback media-context(id: int);
 
     // library catalogue pages
     /// The looks the Text page offers, published once.
@@ -245,6 +250,15 @@ export global Editor {
     in-out property <bool> magnetic;
     /// Hand tool: wheel and drag pan time instead of scrolling the stack.
     in-out property <bool> pan-mode: false;
+    /// Trim follow: the playhead rides a clip edge while it is dragged. A
+    /// remembered preference, which Rust owns.
+    in-out property <bool> trim-follow;
+    /// The preview axis: the monitor shows the frame under the pointer as
+    /// it crosses the lanes, the playhead staying put. A remembered
+    /// preference, which Rust owns; `preview-axis-audio` is whether the
+    /// sound under the pointer plays too.
+    in-out property <bool> preview-axis: false;
+    in-out property <bool> preview-axis-audio;
     in-out property <int> selected-count;
     /// Whether the history has a step that way: what greys the tray's undo
     /// and redo buttons. The Edit menu asks Rust the same question when it
@@ -257,7 +271,17 @@ export global Editor {
     /// Hints, not gates - both sheets open without them.
     in-out property <bool> sound-selected;
     in-out property <bool> title-selected;
+    /// And its picture verbs, freeze, reverse, mirror and rotate: a
+    /// picture on an unlocked lane to mirror or turn, one the playhead is
+    /// inside to freeze, and one video or sound clip to reverse while
+    /// none is being reversed.
+    in-out property <bool> picture-selected;
+    in-out property <bool> freezable;
+    in-out property <bool> reversible;
     in-out property <float> playhead;
+    /// The selected clip's keys, as instants on the timeline: the ruler's
+    /// diamonds. Empty unless exactly one clip is selected.
+    in-out property <[float]> key-marks;
     in-out property <float> frame-rate;
     in-out property <float> scroll-left;
     in-out property <float> seconds-per-pixel;
@@ -270,6 +294,13 @@ export global Editor {
     callback snap-changed(snap: bool);
     callback magnetic-changed(on: bool);
     callback pan-changed(on: bool);
+    callback trim-follow-changed(on: bool);
+    callback preview-axis-changed(on: bool);
+    callback preview-axis-audio-changed(on: bool);
+    /// The preview axis: the pointer is over the lanes at this instant,
+    /// and then it is not.
+    callback hovered(seconds: float);
+    callback hover-ended();
     /// The tray's undo and redo buttons. The keyboard's ⌘Z goes through
     /// the Edit menu instead (see App.app-menu-selected); both land on the
     /// same two methods of the state.
@@ -290,6 +321,8 @@ export global Editor {
     /// decides which clips are worth publishing.
     callback lanes-resized(width: float);
     callback scrubbed(seconds: float);
+    /// A ruler diamond was dragged: every key at `from` moves to `to`.
+    callback key-mark-moved(from: float, to: float);
     callback clip-pressed(id: string, additive: bool, edge: int);
     callback clip-dragged(seconds: float, pixels: length);
     callback clip-released();

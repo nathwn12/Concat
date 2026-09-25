@@ -58,6 +58,16 @@ pub enum TimelineMsg {
     MagneticChanged(bool),
     /// The menu's Magnetic row: the other way round.
     MagneticToggled,
+    /// The tray's preview axis button: the monitor follows the pointer.
+    /// A preference, remembered.
+    TrimFollowChanged(bool),
+    PreviewAxisChanged(bool),
+    /// The button's menu: whether the sound under the pointer plays too.
+    PreviewAxisAudioChanged(bool),
+    /// The pointer is over the lanes at this many seconds.
+    Hovered(f32),
+    /// The pointer left the lanes.
+    HoverEnded,
     /// The lanes scrolled sideways, to this many seconds from the start.
     Scrolled(f32),
     /// The wheel or a pinch: by a factor, about an instant; an anchor
@@ -122,8 +132,32 @@ impl TimelinePane {
                 studio.prefs.magnetic = !studio.prefs.magnetic;
                 studio.prefs.save(&studio.host.dirs);
             }
+            TimelineMsg::TrimFollowChanged(on) => {
+                studio.prefs.trim_follow = on;
+                studio.prefs.save(&studio.host.dirs);
+            }
+            TimelineMsg::PreviewAxisChanged(on) => {
+                studio.prefs.preview_axis = on;
+                studio.prefs.save(&studio.host.dirs);
+                if !on {
+                    studio.end_hover();
+                }
+            }
+            TimelineMsg::PreviewAxisAudioChanged(on) => {
+                studio.prefs.preview_axis_audio = on;
+                studio.prefs.save(&studio.host.dirs);
+            }
+            TimelineMsg::Hovered(seconds) => studio.hover(seconds),
+            TimelineMsg::HoverEnded => studio.end_hover(),
             TimelineMsg::Scrolled(seconds) => self.scroll_left = seconds.max(0.0),
-            TimelineMsg::Zoomed { factor, anchor } => self.zoom(factor, anchor),
+            TimelineMsg::Zoomed { factor, anchor } => {
+                let anchor = if anchor < 0.0 {
+                    self.default_anchor(studio)
+                } else {
+                    anchor
+                };
+                self.zoom(factor, anchor);
+            }
             TimelineMsg::ZoomToFit(width) => {
                 let span = studio.duration().max(1.0) * 1.05;
                 if width > 1.0 {
@@ -131,13 +165,34 @@ impl TimelinePane {
                     self.scroll_left = 0.0;
                 }
             }
-            TimelineMsg::ZoomIn => self.zoom(1.0 / ZOOM_STEP, -1.0),
-            TimelineMsg::ZoomOut => self.zoom(ZOOM_STEP, -1.0),
+            TimelineMsg::ZoomIn => {
+                let anchor = self.default_anchor(studio);
+                self.zoom(1.0 / ZOOM_STEP, anchor);
+            }
+            TimelineMsg::ZoomOut => {
+                let anchor = self.default_anchor(studio);
+                self.zoom(ZOOM_STEP, anchor);
+            }
             TimelineMsg::Resized(width) => self.width = width.max(0.0),
             TimelineMsg::Reset => {
                 self.scroll_left = 0.0;
                 self.lane_view.clear();
             }
+        }
+    }
+
+    /// The anchor point for a zoom that has no pointer position (e.g. keyboard
+    /// shortcut or tray buttons): the playhead if on screen, else the center of
+    /// the visible timeline.
+    fn default_anchor(&self, studio: &Studio) -> f32 {
+        let playhead = f64::from(studio.playhead) as f32;
+        let screen = self.width * self.seconds_per_pixel;
+        if screen > 0.0 && (self.scroll_left..=self.scroll_left + screen).contains(&playhead) {
+            playhead
+        } else if screen > 0.0 {
+            self.scroll_left + screen / 2.0
+        } else {
+            playhead.max(0.0)
         }
     }
 

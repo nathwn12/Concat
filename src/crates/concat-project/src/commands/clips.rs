@@ -29,9 +29,11 @@ pub(super) fn apply(
             if timeline.track(&track_id).is_none() {
                 return Err(CommandError::TrackGone);
             }
-            if ripple {
-                ripple_room_for(timeline, &track_id, start, &media);
-            }
+            let start = if ripple {
+                ripple_room_for(timeline, &track_id, start, &media)
+            } else {
+                start
+            };
             let id = mint.next("c");
             timeline
                 .clips
@@ -84,7 +86,7 @@ pub(super) fn apply(
                     Some(id) => id,
                     None => {
                         // Every lane above the video is taken: mint one at
-                        // the top for the caption to land on.
+                        // the top for the words to land on.
                         let id = mint.next("t");
                         timeline.tracks.push(Track {
                             id: id.clone(),
@@ -201,15 +203,11 @@ pub(super) fn apply(
                 }
                 TrimEdge::Start => {
                     // Dragging the head moves the in-point too, so the pixels
-                    // under the remaining part of the clip do not slide. A
-                    // reversed clip shows the far end of its span at the
-                    // head, so its in-point is the span's other end and stays
-                    // put: only the span changes.
-                    let mut shift = delta.min(clip.duration - MIN_CLIP_DURATION);
-                    if !clip.reverse {
-                        // The head cannot reach before the source begins.
-                        shift = shift.max(-clip.source_start / clip.speed);
-                    }
+                    // under the remaining part of the clip do not slide. The
+                    // head cannot reach before the source begins.
+                    let shift = delta
+                        .min(clip.duration - MIN_CLIP_DURATION)
+                        .max(-clip.source_start / clip.speed);
                     // A magnetic head trim never moves the clip, so the
                     // timeline's own start is no limit to it; a plain one
                     // stops at zero.
@@ -220,11 +218,7 @@ pub(super) fn apply(
                     };
                     let moved = start - clip.start;
                     let duration = clip.duration - moved;
-                    let source_start = if clip.reverse {
-                        clip.source_start
-                    } else {
-                        (clip.source_start + moved * clip.speed).max(0.0)
-                    };
+                    let source_start = (clip.source_start + moved * clip.speed).max(0.0);
                     let old = clip.duration;
                     // Bitwise so no assignment is short-circuited away.
                     let applied = assign(&mut clip.start, start)
@@ -242,10 +236,10 @@ pub(super) fn apply(
                 }
             };
             if ripple && applied && by != 0.0 {
-                for other in timeline.clips_mut() {
-                    if other.id != clip_id && other.track_id == track_id && other.start >= behind {
-                        other.start = (other.start + by).max(0.0);
-                    }
+                for other in timeline.clips_where(|other| {
+                    other.id != clip_id && other.track_id == track_id && other.start >= behind
+                }) {
+                    other.start = (other.start + by).max(0.0);
                 }
             }
             Ok(Outcome {
@@ -264,8 +258,7 @@ pub(super) fn apply(
                 {
                     // A curve does not survive a cut in halves: the map from
                     // here to the source is not affine, so both halves go to
-                    // the constant mean, which is what they averaged. A
-                    // reverse is affine and survives: see `split_source`.
+                    // the constant mean, which is what they averaged.
                     let clip = timeline.clip_at_mut(index);
                     let offset = time - clip.start;
                     if offset > MIN_CLIP_DURATION
@@ -280,13 +273,8 @@ pub(super) fn apply(
                 if offset <= MIN_CLIP_DURATION || offset >= clip.duration - MIN_CLIP_DURATION {
                     continue;
                 }
-                let (head_source, tail_source) = split_source(
-                    clip.source_start,
-                    clip.duration,
-                    clip.speed,
-                    offset,
-                    clip.reverse,
-                );
+                let (head_source, tail_source) =
+                    split_source(clip.source_start, clip.speed, offset);
                 let whole = clip.duration;
                 let mut tail = clip.clone();
                 tail.id = mint.next("c");
@@ -299,14 +287,12 @@ pub(super) fn apply(
                 // an entrance or an exit the whole did not have at the cut.
                 tail.transition_in = None;
                 tail.fade_in = 0.0;
-                tail.animation_in = None;
                 tail.rewindow_keys(whole, offset, whole);
                 created = Some(tail.id.clone());
                 let head = timeline.clip_at_mut(index);
                 head.duration = offset;
                 head.source_start = head_source;
                 head.fade_out = 0.0;
-                head.animation_out = None;
                 head.rewindow_keys(whole, 0.0, offset);
                 timeline.clips.insert(index + 1, Arc::new(tail));
             }
@@ -319,7 +305,11 @@ pub(super) fn apply(
             })
         }
 
-        Command::ReplaceClipMedia { clip_id, item } => {
+        Command::ReplaceClipMedia {
+            clip_id,
+            item,
+            source_start,
+        } => {
             if project.active().clip(&clip_id).is_none() {
                 return Ok(Outcome::default());
             }
@@ -343,6 +333,7 @@ pub(super) fn apply(
                         audio_codec: item.audio_codec,
                         has_audio: item.has_audio,
                         audio_tracks: item.audio_tracks,
+                        origin: item.origin,
                         placeholder: false,
                         color_range: None,
                         extra: Default::default(),
@@ -354,10 +345,13 @@ pub(super) fn apply(
             let Some(index) = timeline.clips.iter().position(|clip| clip.id == clip_id) else {
                 return Ok(Outcome::default());
             };
-            if timeline.clips[index].media_id == media_id {
+            let clip = timeline.clip_at_mut(index);
+            // Bitwise so no assignment is short-circuited away.
+            let applied = assign(&mut clip.media_id, media_id.clone())
+                | source_start.is_some_and(|start| assign(&mut clip.source_start, start.max(0.0)));
+            if !applied {
                 return Ok(Outcome::default());
             }
-            timeline.clip_at_mut(index).media_id = media_id.clone();
             Ok(Outcome {
                 created_id: Some(media_id),
                 applied: true,
@@ -423,6 +417,7 @@ pub(super) fn apply(
                         audio_codec: None,
                         has_audio: false,
                         audio_tracks: Vec::new(),
+                        origin: item.origin,
                         placeholder: false,
                         color_range: None,
                         extra: Default::default(),
@@ -438,12 +433,10 @@ pub(super) fn apply(
             // The cut is a split's, so it leaves the pieces as a split does:
             // under a curve the map is not affine, and the in-point below
             // assumes it is, so both pieces go to the constant mean they
-            // averaged. A reverse is affine and is kept; see `split_source`.
+            // averaged.
             timeline.clip_at_mut(index).speed_curve = None;
-            let reverse = timeline.clips[index].reverse;
             let offset = time - start;
-            let (head_source, tail_source) =
-                split_source(source_start, clip_duration, speed, offset, reverse);
+            let (head_source, tail_source) = split_source(source_start, speed, offset);
             let mut tail = Clip::clone(&timeline.clips[index]);
             tail.id = mint.next("c");
             tail.start = time;
@@ -451,22 +444,19 @@ pub(super) fn apply(
             tail.source_start = tail_source;
             tail.transition_in = None;
             tail.fade_in = 0.0;
-            tail.animation_in = None;
             tail.rewindow_keys(clip_duration, offset, clip_duration);
             let head = timeline.clip_at_mut(index);
             head.duration = offset;
             head.source_start = head_source;
             head.fade_out = 0.0;
-            head.animation_out = None;
             head.rewindow_keys(clip_duration, 0.0, offset);
             timeline.clips.insert(index + 1, Arc::new(tail));
 
             // Ripple every later placement on this track (including the new
             // tail) so the freeze does not sit on top of the remainder.
-            for clip in timeline.clips_mut() {
-                if clip.track_id == track_id && clip.start >= time {
-                    clip.start += hold;
-                }
+            for clip in timeline.clips_where(|clip| clip.track_id == track_id && clip.start >= time)
+            {
+                clip.start += hold;
             }
 
             // The still is the source clip turned into a picture: cloning it
@@ -484,7 +474,6 @@ pub(super) fn apply(
             frozen.source_start = 0.0;
             frozen.speed = 1.0;
             frozen.speed_curve = None;
-            frozen.reverse = false;
             frozen.volume = 1.0;
             frozen.fade_in = 0.0;
             frozen.fade_out = 0.0;
@@ -524,11 +513,6 @@ pub(super) fn apply(
                 .clip_mut(&first.id)
                 .expect("the first piece survives the retain");
             survivor.duration = merged_duration;
-            if first.reverse {
-                // The last piece shows the earliest source, and the merged
-                // clip's in-point is that.
-                survivor.source_start = last.source_start;
-            }
             // Every piece's keys land where they were on the picture; the
             // way out is the last piece's, as the way in is the first's.
             survivor.rewindow_keys(first.duration, 0.0, merged_duration);
@@ -536,7 +520,6 @@ pub(super) fn apply(
                 survivor.absorb_keys(piece, piece.start - first.start);
             }
             survivor.fade_out = last.fade_out;
-            survivor.animation_out = last.animation_out.clone();
             // A validated merge always absorbs at least one piece.
             Ok(Outcome {
                 created_id: Some(first.id),
@@ -591,7 +574,12 @@ const JOIN_EPSILON: f64 = 1e-6;
 /// zero.
 /// https://github.com/jub0t/Concat/issues/106
 fn close_gaps(timeline: &mut Timeline, removed: &[(String, f64, f64)]) {
-    for clip in timeline.clips_mut() {
+    let behind_a_span = |clip: &Clip| {
+        removed
+            .iter()
+            .any(|(track, start, _)| *track == clip.track_id && *start < clip.start)
+    };
+    for clip in timeline.clips_where(behind_a_span) {
         let mut spans: Vec<(f64, f64)> = removed
             .iter()
             .filter(|(track, start, _)| *track == clip.track_id && *start < clip.start)
@@ -632,27 +620,36 @@ fn default_clip(id: String, track_id: String, media: &MediaItem, start: f64) -> 
     clip
 }
 
-/// Shifts every clip on `track_id` at or after `start` right by the
-/// duration the new clip will take, when the new clip would overlap
-/// something already there. A drop with room to spare changes nothing.
-fn ripple_room_for(timeline: &mut Timeline, track_id: &str, start: f64, media: &MediaItem) {
+/// Makes room on `track_id` for a new clip at `start`: a drop onto the
+/// middle of a clip lands at that clip's end instead, and every clip at
+/// or after the place it lands moves right by the new clip's length, so
+/// the new clip slots in and nothing is covered (#129). Returns where the
+/// new clip lands. A drop with room to spare changes nothing.
+fn ripple_room_for(timeline: &mut Timeline, track_id: &str, start: f64, media: &MediaItem) -> f64 {
     let duration = match media.kind {
         MediaKind::Image => DEFAULT_IMAGE_DURATION,
         _ => media.duration.unwrap_or(UNKNOWN_DURATION),
     };
+    // Dropped onto a clip: after it, rather than over it or through it.
+    let start = timeline
+        .clips
+        .iter()
+        .filter(|clip| {
+            clip.track_id == track_id && clip.start < start && start < clip.start + clip.duration
+        })
+        .map(|clip| clip.start + clip.duration)
+        .fold(start, f64::max);
     let end = start + duration;
     let overlaps = timeline.clips.iter().any(|clip| {
         clip.track_id == track_id && clip.start < end && start < clip.start + clip.duration
     });
     if !overlaps {
-        return;
+        return start;
     }
-    for clip in timeline
-        .clips_mut()
-        .filter(|clip| clip.track_id == track_id && clip.start >= start)
-    {
+    for clip in timeline.clips_where(|clip| clip.track_id == track_id && clip.start >= start) {
         clip.start += duration;
     }
+    start
 }
 
 /// The lowest track with nothing occupying `[start, start + duration)`,
@@ -675,9 +672,9 @@ fn first_free_track(timeline: &Timeline, start: f64, duration: f64) -> Option<St
 /// duration)`. `None` when every lane above is taken, which is the caller's
 /// cue to mint a new one at the top.
 ///
-/// Captions go through this so they sit over the video, not under it. The
-/// plain `first_free_track` still walks from the bottom, which is what a
-/// title added by hand wants.
+/// Captions and titles go through this so they sit over the video, not
+/// under it. The plain `first_free_track` still walks from the bottom,
+/// which is what a sound or a picture wants.
 fn first_free_track_above(timeline: &Timeline, start: f64, duration: f64) -> Option<String> {
     let end = start + duration;
     let occupied = |track_id: &str| {
@@ -701,24 +698,11 @@ fn first_free_track_above(timeline: &Timeline, start: f64, duration: f64) -> Opt
         .map(|track| track.id.clone())
 }
 
-/// Where each piece of a clip cut at `offset` begins in the source.
-/// Forwards, the head keeps its in-point and the tail starts `offset ×
-/// speed` later. Backwards, the head shows the late end of the span, so
-/// the tail keeps the in-point and the head's moves up past what the tail
-/// now shows. Either way the two pieces together show exactly what the
-/// whole did.
-fn split_source(
-    source_start: f64,
-    duration: f64,
-    speed: f64,
-    offset: f64,
-    reverse: bool,
-) -> (f64, f64) {
-    if reverse {
-        (source_start + (duration - offset) * speed, source_start)
-    } else {
-        (source_start, source_start + offset * speed)
-    }
+/// Where each piece of a clip cut at `offset` begins in the source: the
+/// head keeps its in-point and the tail starts `offset × speed` later, so
+/// the two pieces together show exactly what the whole did.
+fn split_source(source_start: f64, speed: f64, offset: f64) -> (f64, f64) {
+    (source_start, source_start + offset * speed)
 }
 
 /// Why these clips cannot be merged, or None if they can. A sentence, because
@@ -743,9 +727,6 @@ pub fn why_not_merge(timeline: &Timeline, clip_ids: &[String]) -> Option<String>
     if clips.iter().any(|clip| clip.kind != clips[0].kind) {
         return Some("Merged clips must be the same kind.".to_owned());
     }
-    if clips.iter().any(|clip| clip.reverse != clips[0].reverse) {
-        return Some("Merged clips must play the same way round.".to_owned());
-    }
     if clips.iter().any(|clip| clip.speed_curve.is_some()) {
         return Some("A clip with a speed curve cannot be merged.".to_owned());
     }
@@ -763,14 +744,9 @@ pub fn why_not_merge(timeline: &Timeline, clip_ids: &[String]) -> Option<String>
         if (current.start - (previous.start + previous.duration)).abs() > JOIN_EPSILON {
             return Some("Merged clips must touch, with no gap or overlap.".to_owned());
         }
-        // Forwards the next piece starts where the last one's source ended;
-        // backwards it is the other way round, the earlier piece showing the
-        // later source.
-        let continuous = if previous.reverse {
-            previous.source_start - (current.source_start + current.duration * current.speed)
-        } else {
-            current.source_start - (previous.source_start + previous.duration * previous.speed)
-        };
+        // The next piece starts where the last one's source ended.
+        let continuous =
+            current.source_start - (previous.source_start + previous.duration * previous.speed);
         if continuous.abs() > JOIN_EPSILON {
             return Some("These pieces are no longer in their original order.".to_owned());
         }

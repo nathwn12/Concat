@@ -45,7 +45,7 @@ global Paint {
     public pure function badge(kind: ClipKind) -> Glyph {
         return kind == ClipKind.audio ? Glyph.music
             : kind == ClipKind.image ? Glyph.image
-            : kind == ClipKind.text ? Glyph.sparkle
+            : kind == ClipKind.text ? Glyph.text-mark
             : kind == ClipKind.filter ? Glyph.filter
             : Glyph.film;
     }
@@ -123,6 +123,7 @@ component Ramps inherits Rectangle {
 component Clip inherits Rectangle {
     in property <ClipData> item;
     in property <length> px-per-second;
+    in property <length> viewport-width: 1920px;
     in property <TimelineTool> tool;
     /// how close to an edge counts as grabbing it
     in property <length> edge-grab: 6px;
@@ -133,8 +134,16 @@ component Clip inherits Rectangle {
     /// lanes down — the lanes differ in height, so which row a drag has
     /// reached is a question only the side holding the heights can answer.
     callback dragged(seconds: float, pixels: length);
+    /// Where the pointer is across the clip while it drags, for the lanes
+    /// to scroll when it reaches their edge.
+    callback pointer-at(x: length);
     callback released();
     callback context-requested();
+    /// The pointer over this clip, at this x in it, and then not. For the
+    /// preview axis: a hover belongs to the surface under the pointer, and
+    /// the lanes' floor cannot hear through a clip.
+    callback hovered(x: length);
+    callback hover-ended();
 
     property <color> mark: Paint.mark(root.item.kind);
     property <color> well: Paint.well(root.item.kind);
@@ -148,10 +157,16 @@ component Clip inherits Rectangle {
     property <bool> all-strip: root.item.kind == ClipKind.text
         || root.item.kind == ClipKind.filter;
     property <length> header-h: root.all-strip ? root.height : 17px;
-    /// A filter layer wears its mark before its name, the way the look is
-    /// told from a title or a sound on the lanes at a glance.
-    property <bool> marked: root.item.kind == ClipKind.filter;
+    /// An all-strip clip wears its kind's mark before its name, the way a
+    /// look or a title is told from a sound on the lanes at a glance.
+    property <bool> marked: root.all-strip;
     property <length> text-x: root.marked ? 22px : 7px;
+    /// The `fx` chip: a square sized to the strip it sits in, capped so a
+    /// tall filter bar wears a rounded square and not a tall pill. A video
+    /// header is too short for a square the word fits, so there it keeps
+    /// the width it always had and stays a little wider than tall.
+    property <length> chip: Math.min(root.header-h - 5px, 20px);
+    property <length> chip-w: Math.max(root.chip, 14px);
     property <length> body-h: Math.max(0px, root.height - root.header-h);
     /// The sound band at the foot of a video clip: its file's waveform
     /// under its frames, a third of the body and never a sliver, and there
@@ -285,7 +300,16 @@ component Clip inherits Rectangle {
 
             property <length> tile-w: Math.max(4px,
                 self.height * root.item.strip.frame-width / Math.max(1, root.item.strip.height));
-            property <int> tiles: Math.min(400, Math.ceil(parent.width / self.tile-w));
+
+            // Window tiles to the visible screen area so zooming in never leaves
+            // all tiles off-screen to the left (fixes #156):
+            property <length> vis-start: Math.min(root.width, Math.max(0px, -root.x));
+            property <length> vis-end: Math.max(0px, Math.min(root.width, -root.x + root.viewport-width));
+            property <int> first-tile: Math.max(0, Math.floor(self.vis-start / self.tile-w));
+            property <int> total-tiles: Math.max(1, Math.ceil(root.width / self.tile-w));
+            property <int> tiles: self.vis-end <= self.vis-start ? 0
+                : Math.max(0, Math.min(Math.min(120, self.total-tiles - self.first-tile),
+                    Math.ceil((self.vis-end - self.vis-start) / self.tile-w) + 1));
 
             /// The fraction of the clip under the middle of tile `i`'s
             /// visible part.
@@ -294,8 +318,8 @@ component Clip inherits Rectangle {
                     / 2 / Math.max(1px, self.width);
             }
 
-            for i in self.tiles: Image {
-                x: i * parent.tile-w;
+            for j in self.tiles: Image {
+                x: (parent.first-tile + j) * parent.tile-w;
                 y: 0;
                 width: parent.tile-w;
                 height: parent.height;
@@ -303,7 +327,7 @@ component Clip inherits Rectangle {
                 image-fit: fill;
                 source-clip-x: Math.clamp(
                     Math.floor(root.item.strip.frames
-                        * (root.item.strip.start + root.item.strip.span * parent.at(i))),
+                        * (root.item.strip.start + root.item.strip.span * parent.at(parent.first-tile + j))),
                     0, root.item.strip.frames - 1) * root.item.strip.frame-width;
                 source-clip-y: 0;
                 source-clip-width: root.item.strip.frame-width;
@@ -396,7 +420,7 @@ component Clip inherits Rectangle {
         if root.marked && root.width > 20px: Icon {
             x: 6px;
             y: (parent.height - self.height) / 2;
-            glyph: Glyph.filter;
+            glyph: root.badge;
             size: 11px;
             tint: Theme.clip-ink;
         }
@@ -405,7 +429,7 @@ component Clip inherits Rectangle {
             x: root.text-x;
             y: 0;
             width: parent.width - root.text-x - 7px
-                - (root.item.fx && root.width > 60px ? 20px : 0px);
+                - (root.item.fx && root.width > 60px ? root.chip-w + 6px : 0px);
             height: parent.height;
             text: root.item.name;
             color: Theme.clip-ink;
@@ -415,7 +439,7 @@ component Clip inherits Rectangle {
         }
 
         // A filter layer's ramps run over its whole bar; see Ramps.
-        if root.marked: Ramps {
+        if root.item.kind == ClipKind.filter: Ramps {
             x: 0;
             y: 0;
             width: parent.width;
@@ -429,9 +453,9 @@ component Clip inherits Rectangle {
         // tellable from a plain one without opening a panel.
         if root.item.fx && root.width > 60px: Rectangle {
             x: parent.width - self.width - 4px;
-            y: 2.5px;
-            width: 14px;
-            height: parent.height - 5px;
+            y: (parent.height - self.height) / 2;
+            width: root.chip-w;
+            height: root.chip;
             border-radius: Theme.r-xs;
             background: Theme.clip-chip;
 
@@ -442,10 +466,11 @@ component Clip inherits Rectangle {
                 height: parent.height;
                 text: "fx";
                 color: Theme.clip-ink;
-                // Not a step of the scale: it is sized to the 12px chip it is
+                // Not a step of the scale: it is sized to the chip it is
                 // centred in, the way a glyph is, and moves with that and not
-                // with the type.
-                font-size: 9px;
+                // with the type - 9px in a video header's 12px chip, up to
+                // 11px in a filter bar's 20px one.
+                font-size: Math.max(9px, root.chip * 0.55);
                 horizontal-alignment: center;
                 vertical-alignment: center;
             }
@@ -494,6 +519,13 @@ component Clip inherits Rectangle {
         enabled: !root.locked;
         mouse-cursor: root.edge-at >= 0 ? MouseCursor.ew-resize : MouseCursor.grab;
 
+        changed mouse-x => {
+            if (self.has-hover && !self.pressed) { root.hovered(self.mouse-x); }
+        }
+        changed has-hover => {
+            if (!self.has-hover) { root.hover-ended(); }
+        }
+
         pointer-event(event) => {
             // The right button opens the menu and does nothing else — it must
             // not also start a move, or the menu would appear over a clip that
@@ -523,6 +555,7 @@ component Clip inherits Rectangle {
 
         moved => {
             if (root.tool == TimelineTool.select) {
+                root.pointer-at(self.mouse-x);
                 root.dragged(
                     (self.absolute-position.x + self.mouse-x - self.origin-x)
                         / root.px-per-second,
@@ -534,7 +567,7 @@ component Clip inherits Rectangle {
         property <length> origin-y;
     }
 
-    // ── CapCut-style transition overlay & cut seam controls ───────────────
+    // ── the transition overlay & cut seam controls ────────────────────────
     //
     // Centered symmetrically across the cut seam (x = 0):
     // spans from x: -root.half-w to x: root.half-w.
@@ -862,19 +895,57 @@ export component Lanes inherits Rectangle {
     in property <[ClipData]> clips;
     in property <TimelineTool> tool: TimelineTool.select;
     in property <float> playhead;
+    /// The selected clip's keys as instants; see `Editor.key-marks`.
+    in property <[float]> key-marks;
     in property <float> frame-rate: 30;
     /// Seconds at the left edge of the lanes.
     in property <float> scroll-left;
     /// Hand tool: wheel and drag pan time instead of scrolling the stack.
     in property <bool> pan-mode: false;
+    /// The preview axis: a hairline follows the pointer across the lanes
+    /// and the monitor shows the frame under it. Off, the lanes say nothing
+    /// about where the pointer is.
+    in property <bool> preview-axis: false;
     /// The zoom: seconds covered by one pixel.
     in property <float> seconds-per-pixel: 0.05;
     in property <length> track-scroll;
     in property <length> ruler-height: 28px;
 
     callback scrubbed(seconds: float);
+    /// A ruler diamond dragged from one instant to another.
+    callback key-mark-moved(from: float, to: float);
+    /// The preview axis: the pointer is over the lanes at this instant,
+    /// and then - a beat after it last was - it is not.
+    callback hovered(seconds: float);
+    callback hover-ended();
     /// A press on an empty stretch of lane, before the band it may become.
     callback floor-pressed();
+
+    /// Where the pointer is, for the preview axis, and whether it is here
+    /// at all. Every surface reports through `hover-at` - the floor, the
+    /// ruler, the hand's pane, each clip - because a hover belongs to the
+    /// surface under the pointer and nothing listens through them.
+    property <length> hover-x;
+    property <bool> hover-on;
+
+    function hover-at(x: length) {
+        if (!root.preview-axis) {
+            return;
+        }
+        hover-off-timer.running = false;
+        root.hover-x = x;
+        root.hover-on = true;
+        root.hovered(Math.max(0, root.seconds-at(x)));
+    }
+    /// A beat later, not at once: the pointer crossing from a clip to the
+    /// floor leaves one surface before it reaches the next, and the
+    /// monitor snapping back to the playhead in between would read as a
+    /// glitch. A hover that arrives inside the beat cancels it.
+    function hover-off() {
+        if (root.hover-on) {
+            hover-off-timer.running = true;
+        }
+    }
     callback clip-pressed(id: string, additive: bool, edge: int);
     callback clip-dragged(seconds: float, pixels: length);
     callback clip-released();
@@ -930,6 +1001,36 @@ export component Lanes inherits Rectangle {
     pure function at(seconds: float) -> length {
         return (seconds - root.scroll-left) * root.px-per-second;
     }
+    // ── scrolling at the edge ─────────────────────────────────────────
+    // A scrub or a clip drag that reaches the lanes' edge scrolls the view
+    // that way, a dozen pixels a tick, and re-reports the pointer so the
+    // playhead or the clip keeps up (#101). What is pressed says which
+    // report to repeat.
+    property <bool> scrubbing;
+    property <bool> clip-dragging;
+    property <length> pointer-x;
+    property <float> drag-seconds;
+    property <length> drag-pixels;
+    /// `scroll-left` when the clip was pressed; see the clip's `dragged`.
+    property <float> press-scroll;
+    property <length> edge-zone: 40px;
+    property <bool> at-edge: (root.scrubbing || root.clip-dragging)
+        && (root.pointer-x < root.edge-zone || root.pointer-x > root.width - root.edge-zone);
+
+    edge-scroll := Timer {
+        interval: 16ms;
+        running: root.at-edge;
+        triggered => {
+            root.scrolled(Math.max(0, root.scroll-left
+                + (root.pointer-x < root.edge-zone ? -12 : 12) * root.seconds-per-pixel));
+            if (root.scrubbing) {
+                root.scrubbed(Math.max(0, root.seconds-at(root.pointer-x)));
+            } else {
+                root.clip-dragged(root.drag-seconds + (root.scroll-left - root.press-scroll), root.drag-pixels);
+            }
+        }
+    }
+
     pure function seconds-at(x: length) -> float {
         return root.scroll-left + x / root.px-per-second;
     }
@@ -1082,6 +1183,13 @@ export component Lanes inherits Rectangle {
                 self.to-x = self.mouse-x;
                 self.to-y = self.mouse-y;
             }
+
+            changed mouse-x => {
+                if (self.has-hover && !self.pressed) { root.hover-at(self.mouse-x); }
+            }
+            changed has-hover => {
+                if (!self.has-hover) { root.hover-off(); }
+            }
         }
 
         // ── the clips ────────────────────────────────────────────────────
@@ -1097,15 +1205,33 @@ export component Lanes inherits Rectangle {
 
             item: entry;
             px-per-second: root.px-per-second;
+            viewport-width: parent.width;
             tool: root.tool;
             // Read back through the lane the clip sits on rather than carried
             // on the clip: locking is a property of the lane, and copying it
             // onto every clip would be one more thing to keep in step.
             locked: root.tracks[entry.row].locked;
 
-            pressed(additive, edge) => { root.clip-pressed(entry.id, additive, edge); }
-            dragged(seconds, pixels) => { root.clip-dragged(seconds, pixels); }
-            released => { root.clip-released(); }
+            pressed(additive, edge) => {
+                root.press-scroll = root.scroll-left;
+                root.clip-dragging = true;
+                root.clip-pressed(entry.id, additive, edge);
+            }
+            // The clip reports its delta from the press; a view that has
+            // scrolled since then is added, so the clip stays under the
+            // pointer while the edge scrolls it along.
+            dragged(seconds, pixels) => {
+                root.drag-seconds = seconds;
+                root.drag-pixels = pixels;
+                root.clip-dragged(seconds + (root.scroll-left - root.press-scroll), pixels);
+            }
+            pointer-at(x) => { root.pointer-x = self.x + x; }
+            released => {
+                root.clip-dragging = false;
+                root.clip-released();
+            }
+            hovered(x) => { root.hover-at(self.x + x); }
+            hover-ended => { root.hover-off(); }
             context-requested => {
                 // Captured before the round trip: by the time the items come
                 // back the pointer may have moved, and a menu that opens away
@@ -1274,14 +1400,71 @@ export component Lanes inherits Rectangle {
             // the two gestures can share one surface.
             scrub := TouchArea {
                 mouse-cursor: pointer;
+
+                changed mouse-x => {
+                    if (self.has-hover && !self.pressed) { root.hover-at(self.mouse-x); }
+                }
+                changed has-hover => {
+                    if (!self.has-hover) { root.hover-off(); }
+                }
                 pointer-event(event) => {
                     if (event.kind == PointerEventKind.down) {
+                        root.scrubbing = true;
+                        root.pointer-x = self.mouse-x;
                         root.scrubbed(Math.max(0, root.seconds-at(self.mouse-x)));
+                    } else if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                        root.scrubbing = false;
                     }
                 }
                 moved => {
                     if (self.pressed) {
+                        root.pointer-x = self.mouse-x;
                         root.scrubbed(Math.max(0, root.seconds-at(self.mouse-x)));
+                    }
+                }
+            }
+
+            // The selected clip's keys, as diamonds on the ruler's floor:
+            // clicked to go to one, dragged to move every key at that
+            // instant. Only while one clip is selected (#188).
+            for mark in root.key-marks: TouchArea {
+                property <float> drag-to: mark;
+                property <bool> dragging;
+
+                x: root.at(self.dragging ? self.drag-to : mark) - 7px;
+                y: root.ruler-height - 14px;
+                width: 14px;
+                height: 14px;
+                mouse-cursor: pointer;
+
+                Path {
+                    x: 2px;
+                    y: 2px;
+                    width: 10px;
+                    height: 10px;
+                    viewbox-width: 10;
+                    viewbox-height: 10;
+                    commands: "M 5 0.75 L 9.25 5 L 5 9.25 L 0.75 5 Z";
+                    fill: Theme.accent;
+                    stroke: Theme.ruler;
+                    stroke-width: 1px;
+                }
+
+                moved => {
+                    if (self.pressed) {
+                        self.dragging = true;
+                        self.drag-to = Math.max(0,
+                            root.seconds-at(root.at(mark) + self.mouse-x - self.pressed-x));
+                    }
+                }
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.up || event.kind == PointerEventKind.cancel) {
+                        if (self.dragging && Math.abs(self.drag-to - mark) > 0.0005) {
+                            root.key-mark-moved(mark, self.drag-to);
+                        } else if (event.kind == PointerEventKind.up) {
+                            root.scrubbed(mark);
+                        }
+                        self.dragging = false;
                     }
                 }
             }
@@ -1299,6 +1482,30 @@ export component Lanes inherits Rectangle {
             menu-height: root.menu-height;
             token: root.own-token;
             selected(id) => { root.menu-selected(id); }
+        }
+
+        // ── the preview axis ─────────────────────────────────────────────
+        //
+        // A hairline where the pointer is, over the lanes and the ruler, so
+        // the frame the monitor is showing has a place on the timeline. Dim,
+        // and under the playhead: it is where you are looking, not where the
+        // cut is.
+        hover-off-timer := Timer {
+            interval: 80ms;
+            running: false;
+            triggered => {
+                self.running = false;
+                root.hover-on = false;
+                root.hover-ended();
+            }
+        }
+        if root.preview-axis && root.hover-on: Rectangle {
+            x: root.hover-x;
+            y: 0;
+            width: 1px;
+            height: root.height;
+            background: Theme.fg-dim;
+            visible: self.x >= 0px && self.x <= root.width;
         }
 
         // ── the playhead ─────────────────────────────────────────────────
@@ -1336,13 +1543,20 @@ export component Lanes inherits Rectangle {
             mouse-cursor: pointer;
             property <length> last-x: 0px;
 
+            changed mouse-x => {
+                if (self.has-hover && !self.pressed) { root.hover-at(self.mouse-x); }
+            }
+            changed has-hover => {
+                if (!self.has-hover) { root.hover-off(); }
+            }
+
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down
                     && event.button == PointerEventButton.left) {
                     last-x = self.mouse-x;
                 }
                 if (event.kind == PointerEventKind.move && self.pressed) {
-                    let delta = last-x - self.mouse-x;
+                    let delta = self.mouse-x - last-x;
                     root.scrolled(Math.max(0.0, root.scroll-left - delta / root.px-per-second));
                     last-x = self.mouse-x;
                 }

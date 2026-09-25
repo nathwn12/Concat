@@ -21,12 +21,12 @@
 //     mute/solo pair are `field` buttons inset into one. `field-active` is the
 //     rung that drops below the well, which is right — pressed is recessed.
 //
-//   - **The accent comes down.** #cbf53f is a light on a dark ground. On a
+//   - **The accents come down.** #cbf53f is a light on a dark ground. On a
 //     near-white panel it is a highlighter: illegible as ink, and barely a
-//     shape as a fill. This takes the same hue to where it can do both jobs —
+//     shape as a fill. This takes each hue to where it can do both jobs —
 //     dark enough to read as text on the panel, dark enough for white to read
-//     on it — and `on-accent` flips to white in the same edit, which is
-//     exactly the pairing the dark palette says has to hold. `green` and
+//     on it — and every accent's ink flips to white in the same edit, which
+//     is exactly the pairing the dark palette says has to hold. `green` and
 //     `danger` move for the same reason and by the same amount.
 //
 //   - **The clips are tinted, not shaded.** Each kind's `-well` is a light
@@ -45,6 +45,8 @@
 // The greys carry a trace of blue as they darken, the way `page` does in the
 // dark palette. It is what keeps a large field of light grey from going warm
 // and reading as paper.
+import { Accent } from "accent.slint";
+
 export global Light {
     // surfaces
     //
@@ -60,6 +62,18 @@ export global Light {
     out property <color> field-hover: #e8e8ec;
     out property <color> field-active: #d6d6dd;
 
+    // the launch screen's own ladder — see the dark palette for why it
+    // exists. Deeper here too, which on this side of the switch means a
+    // greyer page and panes that stop short of white: the launcher is the
+    // one screen with no picture on it, and it is allowed to be the quiet
+    // room the rest of the app is not.
+    out property <color> launch-page: #c4c4cd;
+    out property <color> launch-panel: #ededf1;
+    out property <color> launch-well: #d6d6dd;
+    out property <color> launch-raised: #f7f7f8;
+    out property <color> launch-field: #e2e2e8;
+    out property <color> launch-field-active: #cdcdd6;
+
     // hairlines — black-alpha, the mirror of the dark palette's white-alpha,
     // so they hold on panel, well, and ground alike. A shade heavier than a
     // straight inversion: dark hairlines on light surfaces are read at lower
@@ -72,26 +86,35 @@ export global Light {
     out property <color> fg: #16161a;
     out property <color> fg-muted: #56565e;
     out property <color> fg-dim: #86868c;
+    // Away from a light ground is down, not up; see the dark palette.
+    out property <color> fg-hot: #000000;
 
     // accents
     //
-    // Still the lime, taken down to where a near-white ground can hold it. At
-    // this value it clears 4.5:1 against `panel` as ink and white clears 5:1
-    // on it as a fill, which is what lets one token keep doing both jobs — the
-    // 41 places that tint a glyph or a border with it and the 26 that fill a
-    // control with it are the same token, and splitting them into an ink and a
-    // fill would be a second accent to keep in step.
+    // The dark palette's six, each taken down to where a near-white ground
+    // can hold it. At these values every one clears 4.5:1 against `panel` as
+    // ink and white clears 5:1 on it as a fill, which is what lets one token
+    // keep doing both jobs — the 41 places that tint a glyph or a border with
+    // it and the 26 that fill a control with it are the same token, and
+    // splitting them into an ink and a fill would be a second accent to keep
+    // in step.
     //
     // Hover goes darker, not lighter: on this ground more contrast is more
     // engagement, which is the same sentence the dark palette's brighter hover
-    // is saying.
-    out property <color> accent: #4d7c0f;
-    out property <color> accent-hover: #3f680b;
-    out property <color> accent-soft: #4d7c0f2e;   // rgb(77 124 15 / 0.18)
+    // is saying. The ink is white on all six, because every one is now dark —
+    // the pairing the dark palette insists on, honoured from the other side.
+    // `soft` is the colour at 18%.
+    //
+    // The same order as `dark.slint` and as `accent-names` in theme.slint.
+    out property <[Accent]> accents: [
+        { accent: #4d7c0f, hover: #3f680b, soft: #4d7c0f2e, on: #ffffff },   // lime
+        { accent: #1f66d1, hover: #1a55b0, soft: #1f66d12e, on: #ffffff },   // sky
+        { accent: #7239e6, hover: #6030c8, soft: #7239e62e, on: #ffffff },   // violet
+        { accent: #cf2468, hover: #b01d58, soft: #cf24682e, on: #ffffff },   // rose
+        { accent: #b4530a, hover: #98450a, soft: #b4530a2e, on: #ffffff },   // amber
+        { accent: #0f7a6e, hover: #0c665c, soft: #0f7a6e2e, on: #ffffff },   // mint
+    ];
     out property <color> green: #248a3d;
-    // Light ink, because the accent is now dark — the pairing the dark
-    // palette's `on-accent` comment insists on, honoured from the other side.
-    out property <color> on-accent: #ffffff;
     out property <color> on-green: #ffffff;
 
     // The Rail's dragger. White rather than the dark palette's near-white,
@@ -142,8 +165,9 @@ export global Light {
     /// the dark palette's 14% white is: the grid places a clip, it does not
     /// compete with one.
     out property <color> grid: #00000021;
-    // Red, and used for nothing else.
-    out property <color> playhead: #d70015;
+    // Lime, the palette's first accent, as a colour of its own; see the dark
+    // palette. Settings > Appearance can put any colour in its place.
+    out property <color> playhead: #4d7c0f;
     // Drawn on the audio clip's own light ground, so it is a *darker* wash of
     // the kind's hue — the dark palette's light one would vanish into it.
     out property <color> wave: #16703bb3;          // 0.7 alpha
@@ -163,7 +187,7 @@ export global Light {
     out property <color> clip-body: #3a2a10c7;
     /// The chip a clip wears when effects are live on it. Still a dark wash:
     /// it sits on the header's mark, next to `clip-ink`, not on the body.
-    out property <color> clip-chip: #00000059;
+    out property <color> clip-chip: #00000040;
     /// The centre line under a drawn envelope.
     out property <color> wave-centre: #00000038;
     /// A fade: the wedge of what is being taken away, and the line of the

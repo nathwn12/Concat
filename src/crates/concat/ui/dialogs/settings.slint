@@ -9,6 +9,8 @@ import { Glyph, Icon } from "../icons.slint";
 import { Button, DialogRow, DialogSection, Field, Modal, Progress } from "../primitives/modal.slint";
 import { IconButton } from "../primitives/panel.slint";
 import { SegmentedControl } from "../primitives/segmented-control.slint";
+import { ColorPicker } from "../primitives/color-picker.slint";
+import { Fmt } from "../util.slint";
 import { Select } from "../primitives/select.slint";
 import { Switch } from "../inspector/controls.slint";
 import { PaneScroll } from "../workspace/pane.slint";
@@ -86,6 +88,11 @@ export struct SettingsData {
     /// this build and machine have hardware to decode on; off, the
     /// switch is not shown
     hardware-decode-offered: bool,
+    /// the voices run on the machine's accelerator rather than the CPU
+    speech-accelerated: bool,
+    /// this build has an accelerator to offer the voices; off, the switch
+    /// is not shown
+    speech-acceleration-offered: bool,
     /// where model downloads look first: automatic, Concat's mirror,
     /// hf-mirror.com, the original source, a custom URL
     download-source: int,
@@ -104,7 +111,6 @@ export struct SettingsData {
     /// "3 installed · 612 MB on disk"
     disk: string,
     version: string,
-    engine: string,
 }
 
 // Accuracy, as pips rather than a number: five little bars say "third of five"
@@ -292,6 +298,57 @@ component ModelRow inherits Rectangle {
     }
 }
 
+// One accent on offer: a dot of the colour, and a ring round it while it is
+// the one in use. The ring is the text colour rather than the accent — the
+// dot already *is* the accent, and a ring in it would just be a bigger dot —
+// and it sits off the dot by a gap of the panel, so it reads as a mark round
+// the colour and not as a border on it. A hover shows the same ring faintly.
+component AccentSwatch inherits Rectangle {
+    in property <color> colour;
+    /// The colour's name, for whoever cannot see it.
+    in property <string> label;
+    in property <bool> chosen;
+    /// Not a colour yet: the dot wears a plus, cut out in the panel's
+    /// colour, to say it is where a colour would go.
+    in property <bool> blank;
+
+    callback clicked();
+
+    width: 26px;
+    height: 26px;
+    border-radius: 13px;
+    border-width: 2px;
+    border-color: root.chosen ? Theme.fg
+        : touch.has-hover ? Theme.line-strong
+        : Colors.transparent;
+
+    accessible-role: button;
+    accessible-label: root.label;
+
+    animate border-color { duration: 120ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+
+    Rectangle {
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: root.colour;
+
+        animate background { duration: 120ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+
+        if root.blank: Icon {
+            glyph: Glyph.plus;
+            size: 10px;
+            weight: 2.6;
+            tint: Theme.panel;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
 component PageTab inherits Rectangle {
     in property <string> label;
     in property <Glyph> glyph;
@@ -399,10 +456,19 @@ export component SettingsDialog inherits Modal {
     callback auto-resolution-changed(on: bool);
     callback default-rate-changed(rate: int);
     callback theme-changed(dark: bool);
+    /// The accent, as an index into `Theme.accent-names`.
+    callback accent-changed(index: int);
+    /// A colour picked by hand in place of any on the list.
+    callback accent-custom-changed(colour: color);
+    /// The playhead's colour, picked by hand in place of the palette's own.
+    callback playhead-changed(colour: color);
+    /// The palette's own playhead colour, back in place of a picked one.
+    callback playhead-reset();
     callback playhead-stops-changed(on: bool);
     callback custom-context-actions-changed(on: bool);
     callback magnetic-changed(on: bool);
     callback hardware-decode-changed(on: bool);
+    callback speech-accelerated-changed(on: bool);
     callback download-source-changed(index: int);
     callback download-base-edited(text: string);
     callback server-enabled-changed(on: bool);
@@ -415,6 +481,26 @@ export component SettingsDialog inherits Modal {
     callback model-download(id: string);
     callback model-cancel(id: string);
     callback model-remove(id: string);
+
+    /// `Theme.accent-names`, each in the chosen language, in the same order.
+    /// A second list rather than a lookup on the first because the string
+    /// inventory (scripts/locales.py) is built from literal calls, and a name
+    /// that only ever reached `I18n.t` through a variable would never be
+    /// offered to a translator.
+    property <[string]> accent-labels: [
+        I18n.t("Lime"), I18n.t("Sky"), I18n.t("Violet"),
+        I18n.t("Rose"), I18n.t("Amber"), I18n.t("Mint"),
+    ];
+
+    /// The Remote page's token is shown in clear rather than as dots.
+    /// Off each time the sheet opens: showing it is a decision for the
+    /// moment, not a setting.
+    property <bool> token-shown;
+    changed open => {
+        if (!root.open) {
+            root.token-shown = false;
+        }
+    }
 
     open: root.data.open;
     title: I18n.t("Settings");
@@ -569,7 +655,7 @@ export component SettingsDialog inherits Modal {
 
                 // Off, a delete leaves its hole and a trim moves one edge.
                 // On, the lane closes up behind either - the magnetic
-                // timeline of CapCut and the rest, asked for in
+                // timeline of the mainstream editors, asked for in
                 // https://github.com/jub0t/Concat/issues/106
                 DialogSection {
                     title: I18n.t("Magnetic timeline");
@@ -627,26 +713,25 @@ export component SettingsDialog inherits Modal {
                 }
 
                 // Off, the clip context menu shows only the basics.
-                // On, it also shows Flip horizontal, Flip vertical, and Reverse.
+                // On, it also shows Flip horizontal and Flip vertical.
                 DialogSection {
                     title: I18n.t("Timeline shortcuts");
                     hint: I18n.t("Off, the keys do nothing.");
 
-                    // The three keys, each as a keycap beside what it does.
+                    // The two keys, each as a keycap beside what it does.
                     HorizontalLayout {
                         spacing: 16px;
                         alignment: start;
 
                         Shortcut { key: "H"; label: I18n.t("Flip horizontally"); }
                         Shortcut { key: "J"; label: I18n.t("Flip vertically"); }
-                        Shortcut { key: "R"; label: I18n.t("Reverse"); }
                     }
 
                     HorizontalLayout {
                         spacing: 6px;
 
                         Text {
-                            text: I18n.t("Enable flip and reverse shortcuts");
+                            text: I18n.t("Enable flip shortcuts");
                             color: Theme.fg;
                             font-size: Theme.fs;
                             vertical-alignment: center;
@@ -735,14 +820,167 @@ export component SettingsDialog inherits Modal {
             // through the struct would be a second copy to keep in step with
             // the first. The change still goes out as a callback, so Rust
             // stays the one place a remembered preference will be written.
-            if root.data.tab == 1: DialogSection {
-                first: true;
-                title: I18n.t("Theme");
+            if root.data.tab == 1: VerticalLayout {
+                DialogSection {
+                    first: true;
+                    title: I18n.t("Theme");
 
-                SegmentedControl {
-                    options: [I18n.t("Dark"), I18n.t("Light")];
-                    current: Theme.dark ? 0 : 1;
-                    changed(index) => { root.theme-changed(index == 0); }
+                    SegmentedControl {
+                        options: [I18n.t("Dark"), I18n.t("Light")];
+                        current: Theme.dark ? 0 : 1;
+                        changed(index) => { root.theme-changed(index == 0); }
+                    }
+                }
+
+                // The accent: the colour every selection, activated tool and
+                // focus ring is drawn in. Read off the Theme global for the
+                // same reason the theme is, and each one is shown in the
+                // palette that is on, so the choice is made in the room it
+                // will be worn in. The chosen one's name sits at the end of
+                // the row: a dot is a colour, not a word, and the word is
+                // what the settings file remembers.
+                DialogSection {
+                    title: I18n.t("Accent");
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+
+                        for name[index] in Theme.accent-names: AccentSwatch {
+                            colour: Theme.accent-of(index);
+                            label: root.accent-labels[index];
+                            chosen: Theme.accent-choice == index;
+                            clicked => { root.accent-changed(index); }
+                        }
+
+                        // The seventh dot is any colour at all. Grey with a
+                        // plus until one is picked — a grey dot is a blank,
+                        // not an offer of grey — and the picked colour once
+                        // one is. It opens the same picker a title's colour
+                        // does, seeded with the accent that is on, so the
+                        // picking starts from what the window already wears.
+                        Rectangle {
+                            width: 26px;
+                            height: 26px;
+
+                            AccentSwatch {
+                                colour: Theme.accent-is-custom ? Theme.accent-custom : Theme.fg-dim;
+                                label: I18n.t("Custom");
+                                chosen: Theme.accent-is-custom;
+                                blank: !Theme.accent-is-custom;
+                                clicked => { picker.show(); }
+                            }
+
+                            picker := PopupWindow {
+                                x: 0;
+                                y: parent.height + 4px;
+                                width: 236px;
+                                close-policy: close-on-click-outside;
+
+                                Rectangle {
+                                    background: Theme.raised;
+                                    border-width: 1px;
+                                    border-color: Theme.line-strong;
+                                    border-radius: Theme.r;
+
+                                    ColorPicker {
+                                        value: Theme.accent-is-custom ? Theme.accent-custom : Theme.accent;
+                                        alpha: false;
+                                        changed(next) => { root.accent-custom-changed(next); }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: Theme.accent-is-custom ? I18n.t("Custom")
+                                : root.accent-labels[Theme.accent-choice];
+                            color: Theme.fg-muted;
+                            font-size: Theme.fs;
+                            vertical-alignment: center;
+                        }
+
+                        if Theme.accent-is-custom: Text {
+                            text: Fmt.hex-of(Theme.accent-custom, false);
+                            color: Theme.fg-dim;
+                            font-family: Theme.font-technical;
+                            font-size: Theme.fs-sm;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                // The playhead: the one line over the lanes that has to be
+                // found at a glance, whatever the clips under it are wearing.
+                // The palette's own is lime. The second dot opens the same
+                // picker the accent does, and the picked colour replaces the
+                // palette's under both palettes until the first dot puts it
+                // back. Read off the Theme global for the same reason the
+                // accent is, and the hex is always shown: what the line is
+                // wearing is the whole point of the row.
+                DialogSection {
+                    title: I18n.t("Playhead");
+                    hint: I18n.t("The line across the lanes that marks the current time. Pick any colour for it, or the first dot to go back to the theme's own.");
+
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+
+                        AccentSwatch {
+                            colour: Theme.playhead-default;
+                            label: I18n.t("Default");
+                            chosen: !Theme.playhead-is-custom;
+                            clicked => { root.playhead-reset(); }
+                        }
+
+                        Rectangle {
+                            width: 26px;
+                            height: 26px;
+
+                            AccentSwatch {
+                                colour: Theme.playhead-is-custom ? Theme.playhead-custom : Theme.fg-dim;
+                                label: I18n.t("Custom");
+                                chosen: Theme.playhead-is-custom;
+                                blank: !Theme.playhead-is-custom;
+                                clicked => { playhead-picker.show(); }
+                            }
+
+                            playhead-picker := PopupWindow {
+                                x: 0;
+                                y: parent.height + 4px;
+                                width: 236px;
+                                close-policy: close-on-click-outside;
+
+                                Rectangle {
+                                    background: Theme.raised;
+                                    border-width: 1px;
+                                    border-color: Theme.line-strong;
+                                    border-radius: Theme.r;
+
+                                    ColorPicker {
+                                        value: Theme.playhead;
+                                        alpha: false;
+                                        changed(next) => { root.playhead-changed(next); }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: Theme.playhead-is-custom ? I18n.t("Custom") : I18n.t("Default");
+                            color: Theme.fg-muted;
+                            font-size: Theme.fs;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: Fmt.hex-of(Theme.playhead, false);
+                            color: Theme.fg-dim;
+                            font-family: Theme.font-technical;
+                            font-size: Theme.fs-sm;
+                            vertical-alignment: center;
+                        }
+                    }
                 }
             }
 
@@ -787,16 +1025,48 @@ export component SettingsDialog inherits Modal {
                 }
             }
 
-            if root.data.tab == 3: DialogSection {
-                first: true;
-                title: I18n.t("Voices");
+            if root.data.tab == 3: VerticalLayout {
+                DialogSection {
+                    first: true;
+                    title: I18n.t("Voices");
 
-                for model in root.voices: ModelRow {
-                    model: model;
-                    activated => { root.model-activated(model.id); }
-                    download => { root.model-download(model.id); }
-                    cancel => { root.model-cancel(model.id); }
-                    remove => { root.model-remove(model.id); }
+                    for model in root.voices: ModelRow {
+                        model: model;
+                        activated => { root.model-activated(model.id); }
+                        download => { root.model-download(model.id); }
+                        cancel => { root.model-cancel(model.id); }
+                        remove => { root.model-remove(model.id); }
+                    }
+                }
+
+                // The machine's own accelerator, where the build has one.
+                // A bet rather than a default: CoreML takes the parts of a
+                // network it knows and hands the rest to the CPU, so how
+                // much faster a read gets is the model's business.
+                if root.data.speech-acceleration-offered: DialogSection {
+                    title: I18n.t("Engine");
+                    hint: I18n.t("On, the voices run on this Mac's GPU and Neural Engine through CoreML wherever the model allows, and on the CPU where it does not. Off, everything runs on the CPU. Takes effect on the next read; a model already loaded is loaded again.");
+
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: I18n.t("Run voices on the GPU");
+                            color: Theme.fg;
+                            font-size: Theme.fs;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        VerticalLayout {
+                            alignment: center;
+                            Switch {
+                                checked: root.data.speech-accelerated;
+                                toggled(on) => { root.speech-accelerated-changed(on); }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -892,6 +1162,10 @@ export component SettingsDialog inherits Modal {
                     title: I18n.t("Token");
                     hint: I18n.t("What a connection must present before its first call. Left empty, the server makes one up each time it starts and shows it here.");
 
+                    // Dots until asked, the way a password field is: the
+                    // token is what lets a connection in, and Settings is
+                    // open on screens other people look at. The eye shows
+                    // it for as long as the sheet is up.
                     HorizontalLayout {
                         spacing: 6px;
 
@@ -899,7 +1173,15 @@ export component SettingsDialog inherits Modal {
                             value: root.data.server-token;
                             placeholder: I18n.t("none");
                             technical: true;
+                            secret: !root.token-shown;
                             edited(text) => { root.server-token-edited(text); }
+                        }
+
+                        Button {
+                            square: true;
+                            glyph: root.token-shown ? Glyph.eye-off : Glyph.eye;
+                            label: root.token-shown ? I18n.t("Hide the token") : I18n.t("Show the token");
+                            clicked => { root.token-shown = !root.token-shown; }
                         }
 
                         Button {
@@ -911,6 +1193,9 @@ export component SettingsDialog inherits Modal {
             }
 
             if root.data.tab == 5: VerticalLayout {
+                // The name and the build, and nothing under them: the engine
+                // and the FFmpeg it links are rows of the table below, where
+                // a report reads them from.
                 DialogSection {
                     first: true;
                     title: I18n.t("About");
@@ -921,40 +1206,48 @@ export component SettingsDialog inherits Modal {
                         font-size: Theme.fs-lg;
                         font-weight: Theme.weight-title;
                     }
-
-                    Text {
-                        text: root.data.engine;
-                        color: Theme.fg-muted;
-                        font-family: Theme.font-technical;
-                        font-size: Theme.fs-sm;
-                    }
-
-                    Text {
-                        text: I18n.t("Everything on this machine. Transcription and speech run against models you download here, and nothing about a project leaves the device.");
-                        color: Theme.fg-muted;
-                        font-size: Theme.fs;
-                        wrap: word-wrap;
-                    }
                 }
 
                 // The block an issue report is opened with. Every line in it
                 // is something the report will be asked for and nobody has to
                 // hand — which build, which renderer, which OS — and reading
                 // them off a screen one at a time is how a report ends up
-                // missing the one that mattered. Hence the button: the whole
+                // missing the one that mattered. Hence the buttons: the whole
                 // block in one press, and the rows still selectable a line at
                 // a time for when only one of them is the answer.
-                DialogSection {
-                    title: I18n.t("System information");
+                //
+                // Laid out by hand rather than as a DialogSection, because the
+                // buttons belong on the title's row, at its far end, and a
+                // section's header has no slot for them. The hairline, the
+                // header's height and the body's inset are the section's own,
+                // so the group reads as one more of them.
+                Rectangle {
+                    height: 1px;
+                    background: Theme.line;
+                }
+
+                Rectangle {
+                    height: 30px;
 
                     HorizontalLayout {
-                        alignment: end;
+                        padding-left: 14px;
+                        padding-right: 14px;
                         spacing: Theme.gap;
 
-                        // The other half of a report: the block above says
-                        // what this machine is, the log says what the app
-                        // did on it. A run writes one file, and the last ten
-                        // runs are in the folder this opens.
+                        Text {
+                            text: I18n.t("System information");
+                            color: Theme.fg;
+                            font-size: Theme.fs-lg;
+                            font-weight: Theme.weight-title;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        // The other half of a report: the block says what
+                        // this machine is, the log says what the app did on
+                        // it. A run writes one file, and the last ten runs
+                        // are in the folder this opens.
                         IconButton {
                             glyph: Glyph.folder;
                             label: I18n.t("Show the log");
@@ -977,17 +1270,19 @@ export component SettingsDialog inherits Modal {
                             }
                         }
                     }
+                }
 
-                    // No spacing: the rows carry their own height, the way the
-                    // Details panel's table does, and the section's own 6px on
-                    // top of it opens the table back into a list of paragraphs.
-                    VerticalLayout {
-                        spacing: 0px;
+                // No spacing: the rows carry their own height, the way the
+                // Details panel's table does, and any more between them opens
+                // the table back into a list of paragraphs.
+                VerticalLayout {
+                    padding: 14px;
+                    padding-top: 4px;
+                    spacing: 0px;
 
-                        for fact in root.system-facts: FactRow {
-                            label: fact.label;
-                            value: fact.value;
-                        }
+                    for fact in root.system-facts: FactRow {
+                        label: fact.label;
+                        value: fact.value;
                     }
                 }
             }

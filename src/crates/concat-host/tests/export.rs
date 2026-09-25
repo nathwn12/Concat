@@ -24,8 +24,8 @@
 //! whose every frame is a solid colour naming its source second, and a
 //! sound that is a tone during the odd seconds and silence during the
 //! even. Read back, a frame's colour and a stretch's loudness say which
-//! second of which source they came from, which is how a trim, a speed
-//! change or a reverse is checked and not just survived.
+//! second of which source they came from, which is how a trim or a speed
+//! change is checked and not just survived.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -37,17 +37,16 @@ use concat_host::dirs::AppDirs;
 use concat_host::export::{self, ExportSpec};
 use concat_host::session::Session;
 use concat_host::titles::Titles;
-use concat_host::{media, projects};
+use concat_host::{media, projects, reverse};
 use concat_media::audio::{self as sound, AudioClip};
 use concat_media::{
     AudioDecoder, AudioOptions, DecodeOptions, Decoder, EncodeOptions, Encoder,
     Error as MediaError, FrameSink, FrameSource, HwDevice, RateMode, SampleFormat, VideoCodec,
 };
-use concat_project::animation;
 use concat_project::commands::{ClipMove, ClipPatch, Command, TrackFlag, TrimEdge};
 use concat_project::model::{
-    AnimationSlot, AppliedFilter, ClipAnimation, ColorRange, Crop, KeyEase, KeyProperty,
-    SpeedPoint, TextStyle, Transition, VideoSettings,
+    AppliedFilter, ColorRange, Crop, KeyEase, KeyProperty, SpeedPoint, TextStyle, Transition,
+    VideoSettings,
 };
 
 /// The sample rate every source and every export carries.
@@ -772,7 +771,7 @@ fn every_edit_still_exports() {
     exported.expect_second(2.25, 2);
 
     // Retimed: twice as fast, then half speed with the pitch riding, then
-    // backwards, then on a curve, then undone back to half speed.
+    // on a curve, then undone back to half speed.
     studio.apply(Command::SetClipSpeed {
         clip_id: tail.clone(),
         speed: 2.0,
@@ -802,17 +801,6 @@ fn every_edit_still_exports() {
     exported.expect_second(8.5, 5);
     exported.expect_sound(16.0);
 
-    studio.apply(Command::UpdateClip {
-        clip_id: tail.clone(),
-        patch: ClipPatch {
-            reverse: Some(true),
-            ..ClipPatch::default()
-        },
-    });
-    let exported = studio.export("reversed");
-    exported.expect_second(2.25, 5);
-    exported.expect_second(8.5, 2);
-
     studio.apply(Command::SetClipSpeedCurve {
         clip_id: tail.clone(),
         curve: Some(vec![
@@ -830,7 +818,6 @@ fn every_edit_still_exports() {
     exported.expect_length(16.0);
     exported.expect_sound(16.0);
 
-    studio.session.undo();
     studio.session.undo();
     let exported = studio.export("undone to half speed");
     exported.expect_second(2.25, 2);
@@ -989,8 +976,7 @@ fn every_edit_still_exports() {
         });
     }
 
-    // The transform, the crop, the flips, a blend, opacity, fades, gain,
-    // and an animation on each slot.
+    // The transform, the crop, the flips, a blend, opacity, fades, gain.
     studio.apply(Command::SetClipTransform {
         clip_id: cam_clip.clone(),
         scale: Some(0.6),
@@ -1022,21 +1008,6 @@ fn every_edit_still_exports() {
     let exported = studio.export("transform crop blend fades");
     exported.expect_length(end);
     exported.expect_sound(end);
-
-    for slot in [AnimationSlot::In, AnimationSlot::Out, AnimationSlot::Combo] {
-        let names = animation::names(slot);
-        assert!(!names.is_empty(), "{slot:?} offers animations");
-        studio.apply(Command::SetClipAnimation {
-            clip_id: cam_clip.clone(),
-            slot,
-            animation: Some(ClipAnimation {
-                preset: names[0].to_owned(),
-                duration: 0.5,
-            }),
-        });
-    }
-    let exported = studio.export("animations");
-    exported.expect_length(end);
 
     // A layer over everything, and a title.
     studio.apply(Command::AddLayerClip {
@@ -1343,4 +1314,102 @@ fn an_export_decodes_on_the_hardware_when_preferred() {
         exported.expect_tone(5.5);
         exported.expect_quiet(4.5);
     }
+}
+
+/// A reversed copy of a span plays its seconds backwards, picture and
+/// sound, and comes out of the host's reverse job as one file the
+/// timeline reads like any other. The screen recording's seconds 1 to 6
+/// are three hundred frames, which span two of the job's segments, so the
+/// segments come back in the right order too; the clock's tone, on the
+/// source's odd seconds, falls where those seconds land in the copy.
+/// Asked again, the copy already written is handed back untouched. A
+/// sound clip's span comes back as a file of sound alone.
+#[test]
+fn a_reversed_span_plays_its_seconds_backwards() {
+    let scratch = Scratch::new("reverse");
+    let sources = Sources::make(scratch.path());
+    let project = scratch.path().join("project");
+    let reversers = reverse::Reversers::new();
+
+    let peek = sources.peek.to_string_lossy().into_owned();
+    let request = reverse::ReverseRequest {
+        target: reverse::target_for(&project, &peek, 1.0, 5.0, false).expect("named"),
+        media_path: peek,
+        audio_only: false,
+        start: 1.0,
+        duration: 5.0,
+    };
+    let mut last = 0.0f32;
+    let written = reversers
+        .reverse(&request, &mut |fraction| {
+            assert!(
+                fraction >= last,
+                "progress went back from {last} to {fraction}"
+            );
+            last = fraction;
+        })
+        .expect("reverses the span");
+    assert_eq!(written, request.target);
+    assert!(!reversers.is_busy(), "the slot is free again");
+
+    let copy = Exported::read("reversed", &written, (60, 1));
+    copy.expect_length(5.0);
+    copy.expect_sound(5.0);
+    // The copy's second t is the source's 6 - t: seconds 5, 4, 3, 2, 1.
+    copy.expect_second(0.25, 5);
+    copy.expect_second(2.5, 3);
+    copy.expect_second(4.75, 1);
+    // The clock rang on the odd seconds, which now open and close the
+    // copy with a quiet even second between each pair.
+    copy.expect_tone(0.25);
+    copy.expect_quiet(1.5);
+    copy.expect_tone(2.5);
+    copy.expect_quiet(3.5);
+    copy.expect_tone(4.75);
+
+    let again = reversers
+        .reverse(&request, &mut |_| {
+            panic!("a copy on disk is not written again")
+        })
+        .expect("finds the copy");
+    assert_eq!(again, written);
+
+    let aac = sources.aac.to_string_lossy().into_owned();
+    let sound_request = reverse::ReverseRequest {
+        target: reverse::target_for(&project, &aac, 2.0, 3.0, true).expect("named"),
+        media_path: aac,
+        audio_only: true,
+        start: 2.0,
+        duration: 3.0,
+    };
+    let sound = reversers
+        .reverse(&sound_request, &mut |_| {})
+        .expect("reverses the sound");
+    let info = concat_media::probe(&sound).expect("probes the sound");
+    assert!(
+        info.video.is_none() && info.audio.is_some(),
+        "a sound clip's copy is sound alone"
+    );
+    let mut decoder = AudioDecoder::open(
+        &sound,
+        &AudioOptions {
+            rate: RATE,
+            channels: 2,
+            format: SampleFormat::F32,
+            ..AudioOptions::default()
+        },
+    )
+    .expect("opens the sound");
+    let heard = Exported {
+        label: "reversed sound".to_owned(),
+        fps: 1.0,
+        frames: Vec::new(),
+        audio: Some(decoder.collect_f32().expect("decodes the sound")),
+    };
+    heard.expect_sound(3.0);
+    // Seconds 2 to 5 backwards: the copy's second t is the source's 5 - t,
+    // so the odd second, 3, rings in the middle with quiet either side.
+    heard.expect_quiet(0.5);
+    heard.expect_tone(1.5);
+    heard.expect_quiet(2.5);
 }

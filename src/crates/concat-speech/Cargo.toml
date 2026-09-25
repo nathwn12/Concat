@@ -29,6 +29,11 @@ bzip2 = "0.6"
 ort = { workspace = true, optional = true }
 tokenizers = { version = "0.23", optional = true, default-features = false, features = ["fancy-regex"] }
 
+# What a run says about itself: which model loaded, how long a read took,
+# where a loop ran out. Through the facade, so the window's log file and a
+# terminal both get it; see concat-host's logs.rs.
+log = { version = "0.4", features = ["std"] }
+
 # Transcription: whisper.cpp in-process. Built from source by cmake at build
 # time; on macOS with Metal so the encoder runs on the GPU.
 whisper-rs = "0.16"
@@ -63,6 +68,10 @@ sherpa-onnx = { version = "1.13", default-features = false, features = ["shared"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = { version = "0.16", features = ["metal"] }
+# The CoreML provider, so Chatterbox can run on the Mac's own GPU and Neural
+# Engine when Settings › Speech asks for it. Pulls pyke's CoreML build of the
+# runtime in place of the plain one.
+ort = { workspace = true, optional = true, features = ["coreml"] }
 
 [features]
 chatterbox = ["dep:ort", "dep:tokenizers"]

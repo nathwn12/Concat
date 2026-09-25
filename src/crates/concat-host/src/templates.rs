@@ -444,6 +444,7 @@ mod tests {
                 audio_codec: None,
                 has_audio: false,
                 audio_tracks: Vec::new(),
+                origin: None,
             },
         }
     }
@@ -539,7 +540,9 @@ mod tests {
         )
         .expect("instantiates");
 
-        let opened = projects::read_document(&made.path).expect("reads back");
+        let opened = projects::read_document(&made.path)
+            .expect("reads back")
+            .expect("a document");
         let media = opened["media"].as_array().expect("media");
         let sound = media[1]["path"].as_str().expect("path");
         assert!(
@@ -587,7 +590,9 @@ mod tests {
         .expect("instantiates");
         assert_eq!((project.width, project.height), (1920, 1080));
 
-        let document = projects::read_document(&project.path).expect("reads back");
+        let document = projects::read_document(&project.path)
+            .expect("reads back")
+            .expect("a document");
         let media = document["media"].as_array().expect("media");
         assert!(media.iter().all(|item| {
             !item

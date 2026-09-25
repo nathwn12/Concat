@@ -29,7 +29,7 @@ cargo run -p concat-cli -- api '{"method":"version"}'
 ```
 
 ```json
-{"jsonrpc":"2.0","id":null,"result":{"apiVersion":"0.2","concat":"0.2.3","dirs":{"config":"…","data":"…"},"capabilities":["events"]}}
+{"jsonrpc":"2.0","id":null,"result":{"apiVersion":"0.2","concat":"0.2.4","dirs":{"config":"…","data":"…"},"capabilities":["events"]}}
 ```
 
 **2. Make a video.** Put these lines in `edit.jsonl` and pipe them in with
@@ -94,8 +94,7 @@ to the API reaches every transport without a change to any of them.
 | The edit commands | `src/crates/concat-project/src/commands/mod.rs` |
 
 Related reading: [`ARCHITECTURE.md`](../ARCHITECTURE.md) places the API in
-the engine; [`EFFECTS.md`](../EFFECTS.md) is for writing the packages the
-catalogue lists.
+the engine.
 
 ## Licensing
 

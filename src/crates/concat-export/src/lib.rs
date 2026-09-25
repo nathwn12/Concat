@@ -124,11 +124,8 @@ pub struct ExportClip {
     /// clip's length; empty for the constant `speed`. See `SpeedCurve`.
     #[serde(default)]
     pub speed_curve: Vec<(f64, f64)>,
-    /// Played backwards.
-    #[serde(default)]
-    pub reverse: bool,
     /// Keys over the clip's placement and opacity, resolved by the UI from
-    /// its animation presets. Empty for none.
+    /// Empty for none.
     #[serde(default)]
     pub animation: Vec<ExportKey>,
     /// Mirrored left to right.
@@ -248,7 +245,6 @@ impl ExportClip {
             speed: 1.0,
             preserve_pitch: true,
             speed_curve: Vec::new(),
-            reverse: false,
             animation: Vec::new(),
             flip_h: false,
             flip_v: false,
@@ -925,18 +921,9 @@ fn track_slice(track: &AnimTrack, x0: f64, x1: f64) -> AnimTrack {
 /// The engine's view of one audible clip - or several, when its speed
 /// changes over it. Sound can only change tempo in steps, so a curve is cut
 /// into pieces of constant rate, each at the mean of its stretch of the
-/// curve and starting where the curve says the source had got to. A reverse
-/// runs the pieces' sound backwards, and the pieces themselves in reverse
-/// order of source, which is what playing the clip backwards means.
+/// curve and starting where the curve says the source had got to.
 pub fn audio_pieces(clip: &ExportClip) -> Vec<AudioClip> {
-    let mut chain = clip.filter_chain.clone();
-    if clip.reverse {
-        chain = if chain.is_empty() {
-            "areverse".to_owned()
-        } else {
-            format!("areverse,{chain}")
-        };
-    }
+    let chain = clip.filter_chain.clone();
     let track = volume_track(clip);
     let Some(curve) = SpeedCurve::new(&clip.speed_curve) else {
         return vec![AudioClip {
@@ -957,20 +944,13 @@ pub fn audio_pieces(clip: &ExportClip) -> Vec<AudioClip> {
     // Pieces a tenth of a second long, or eight at least: fine enough that
     // a tempo step is not heard, coarse enough that the graph stays small.
     let count = ((clip.duration / 0.1).ceil() as usize).clamp(8, 400);
-    let span = curve.mean() * clip.duration;
     curve
         .pieces(count)
         .into_iter()
         .map(|(x0, x1, consumed, mean)| {
             let piece_duration = (x1 - x0) * clip.duration;
             let forward = consumed * clip.duration;
-            let source_start = if clip.reverse {
-                // Backwards: this piece plays the source that ends where the
-                // forward map had got to, so it starts one piece earlier.
-                clip.source_start + (span - forward - mean * piece_duration).max(0.0)
-            } else {
-                clip.source_start + forward
-            };
+            let source_start = clip.source_start + forward;
             let piece_start = clip.start + x0 * clip.duration;
             let piece_end = piece_start + piece_duration;
             // The clip's fades, as they fall on this piece.
@@ -1815,6 +1795,74 @@ pub fn preview_moments(
 
 #[cfg(test)]
 mod tests {
+    /// Every built-in package's FFmpeg chain builds a filter graph.
+    ///
+    /// A package's fixtures compare its chain as *text*, so a chain FFmpeg
+    /// cannot parse passes them for as long as the fixture is wrong in the
+    /// same way - which is what had happened to the two colour keys, where
+    /// `color=0x00FF00:similarity=` was written `color=0x00FF00ty=`: the
+    /// fixtures agreed with the template, and nothing asked FFmpeg until a
+    /// frame was rendered and the whole preview failed. This asks it, for
+    /// every package at its defaults.
+    ///
+    /// Video kinds only, and only the chains that fit a clip's slot in the
+    /// graph: a chain with pads of its own (`split[a][b];...`) is refused
+    /// by `validate_chain` by design and is carried by a shader pass
+    /// instead.
+    #[test]
+    fn every_package_chain_builds_a_filter_graph() {
+        use concat_effects::manifest::Kind;
+        use concat_project::model::AppliedFilter;
+
+        let path =
+            std::env::temp_dir().join(format!("concat-chain-test-{}.mp4", std::process::id()));
+        let mut encoder =
+            Encoder::create(&path, 64, 64, FrameRate::THIRTY, &EncodeOptions::default())
+                .expect("encodes");
+        let mut frame = Frame::black(64, 64);
+        frame.fill([40, 160, 90, 255]);
+        for _ in 0..4 {
+            encoder.write_frame(&frame).expect("writes");
+        }
+        encoder.finish().expect("finishes");
+
+        let catalogue = Catalogue::builtin();
+        let mut failures: Vec<String> = Vec::new();
+        for package in catalogue.packages() {
+            let kind = package.kind();
+            if kind != Kind::Effect && kind != Kind::Filter {
+                continue;
+            }
+            let applied = [AppliedFilter::new(&package.manifest.effect.id)];
+            let chain = catalogue.video_chain(&applied);
+            if chain.is_empty() || chain.contains('[') || chain.contains(';') {
+                continue;
+            }
+            let decoded = Decoder::open(
+                &path,
+                &DecodeOptions::default().scaled_to(64, 64).filtered(&chain),
+            )
+            .and_then(|mut decoder| decoder.next_frame());
+            match decoded {
+                Ok(Some(_)) => {}
+                Ok(None) => failures.push(format!(
+                    "{}: no frame from {chain}",
+                    package.manifest.effect.id
+                )),
+                Err(error) => failures.push(format!(
+                    "{}: {error} from {chain}",
+                    package.manifest.effect.id
+                )),
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            failures.is_empty(),
+            "chains that do not build:\n{}",
+            failures.join("\n")
+        );
+    }
+
     /// A treatment on track 1 runs over what track 0 drew and not over what
     /// track 2 draws on top of it, and its strength blends the result back.
     #[test]

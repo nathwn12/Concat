@@ -229,7 +229,10 @@ impl Titles {
         );
         let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
         let (kept, order) = &mut *live;
-        if kept.insert(key, (art.clone(), Arc::clone(&frame))).is_none() {
+        if kept
+            .insert(key, (art.clone(), Arc::clone(&frame)))
+            .is_none()
+        {
             order.push_back(key);
         }
         while order.len() > LIVE_KEPT {
@@ -435,6 +438,9 @@ fn title_style(style: &TextStyle) -> TitleStyle {
         stroke_color: style.stroke_color.clone(),
         shadow: style.shadow,
         background: style.background.clone(),
+        background_radius: style.background_radius,
+        background_padding_x: style.background_padding_x,
+        background_padding_y: style.background_padding_y,
         line_height: style.line_height,
         max_width: style.max_width,
         max_height: style.max_height,

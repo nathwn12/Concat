@@ -61,7 +61,7 @@ use panes::settings::SettingsMsg;
 use panes::speech::SpeechMsg;
 use panes::start::StartMsg;
 use panes::timeline::TimelineMsg;
-use studio::{Models, OUTPUTS, RESOLUTIONS, START_RATES, Studio};
+use studio::{ASPECTS, Models, OUTPUTS, SIZES, START_RATES, Studio};
 use ui::*;
 
 /// Opens this run's log file and makes it where the app writes things down.
@@ -131,6 +131,11 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 shell.studio.borrow().publish(&app, &shell.models);
             });
         },
+        // A press anywhere but the field being typed into takes the focus
+        // back, the way a browser does; the field commits on the way out.
+        // See the handler in platform.rs for why this is a raw event and
+        // not a TouchArea.
+        || Shell::with(|_, app| app.invoke_blur()),
     )?;
 
     let host = match Host::start(gpu) {
@@ -153,6 +158,39 @@ pub fn run() -> Result<(), slint::PlatformError> {
     studio.watch_packages();
     let dark = studio.prefs.dark.unwrap_or(true);
     app.global::<Theme>().set_dark(dark);
+    // The accent is remembered by name and the names live on the Theme
+    // global, so the index is looked up there rather than kept in Rust too.
+    // A remembered hex is a colour picked by hand, which is the slot past
+    // the names.
+    {
+        let theme = app.global::<Theme>();
+        let names = theme.get_accent_names();
+        let count = slint::Model::row_count(&names);
+        match studio.prefs.custom_accent().and_then(format::parse_colour) {
+            Some(colour) => {
+                theme.set_accent_custom(colour);
+                theme.set_accent_choice(count as i32);
+            }
+            None => {
+                let index = studio
+                    .prefs
+                    .accent_index(slint::Model::iter(&names).map(|name| name.to_string()));
+                theme.set_accent_choice(index as i32);
+            }
+        }
+    }
+    // A picked playhead colour is remembered as its hex; none remembered,
+    // or one that will not parse, is the palette's own.
+    if let Some(colour) = studio
+        .prefs
+        .playhead
+        .as_deref()
+        .and_then(format::parse_colour)
+    {
+        let theme = app.global::<Theme>();
+        theme.set_playhead_custom(colour);
+        theme.set_playhead_is_custom(true);
+    }
 
     let shell = Rc::new(Shell {
         app: app.as_weak(),
@@ -189,13 +227,20 @@ pub fn run() -> Result<(), slint::PlatformError> {
         editor.set_adjust_params(ModelRc::from(models.adjust_params.clone()));
         app.global::<Keyframes>()
             .set_rows(ModelRc::from(models.key_rows.clone()));
+        app.global::<KeyEditor>()
+            .set_rows(ModelRc::from(models.key_editor_rows.clone()));
+        editor.set_key_marks(ModelRc::from(models.key_marks.clone()));
         app.global::<Library>()
             .set_views(ModelRc::from(models.library_views.clone()));
         editor.set_menu_items(ModelRc::from(models.menu.clone()));
         app.set_caption_models(ModelRc::from(models.caption_models.clone()));
         app.set_speech_models(ModelRc::from(models.speech_models.clone()));
+        app.set_speech_model_details(ModelRc::from(models.speech_model_details.clone()));
         app.set_speech_voices(ModelRc::from(models.speakers.clone()));
         app.set_speech_voice_details(ModelRc::from(models.speaker_details.clone()));
+        app.set_speech_samples(ModelRc::from(models.speech_samples.clone()));
+        app.set_speech_sample_waves(ModelRc::from(models.speech_sample_waves.clone()));
+        app.set_speech_sample_details(ModelRc::from(models.speech_sample_details.clone()));
         app.set_app_menu_items(ModelRc::from(models.bar.clone()));
         app.set_transcribers(ModelRc::from(models.transcribers.clone()));
         app.set_voices(ModelRc::from(models.voices.clone()));
@@ -227,17 +272,40 @@ pub fn run() -> Result<(), slint::PlatformError> {
     ))));
 
     // The ladders' labels, handed over once; the index the form reports back
-    // is what carries the meaning. Resolution index 0 is Auto, so every rung
-    // in RESOLUTIONS sits one past its own position.
-    app.set_start_resolutions(ModelRc::from(Rc::new(VecModel::from(
-        std::iter::once(SharedString::from("Auto"))
-            .chain(RESOLUTIONS.iter().map(|(label, _, _)| SharedString::from(*label)))
+    // is what carries the meaning. The shapes carry their ratio as well,
+    // because the form draws each one as a box of its own proportions and
+    // a label is a string Slint cannot do arithmetic with.
+    app.set_start_aspects(ModelRc::from(Rc::new(VecModel::from(
+        ASPECTS
+            .iter()
+            .map(|(label, w, h)| ChipOption {
+                label: SharedString::from(*label),
+                ratio: *w as f32 / *h as f32,
+            })
             .collect::<Vec<_>>(),
+    ))));
+    // The size ladder has Auto at its head, so index 0 is Auto and every
+    // SIZES rung sits one past its own position. A size is a word and
+    // nothing else, so its chips carry no shape: a zero ratio is what the
+    // form draws nothing for.
+    app.set_start_sizes(ModelRc::from(Rc::new(VecModel::from(
+        std::iter::once(ChipOption {
+            label: SharedString::from("Auto"),
+            ratio: 0.0,
+        })
+        .chain(SIZES.iter().map(|(label, _)| ChipOption {
+            label: SharedString::from(*label),
+            ratio: 0.0,
+        }))
+        .collect::<Vec<_>>(),
     ))));
     app.set_start_rates(ModelRc::from(Rc::new(VecModel::from(
         START_RATES
             .iter()
-            .map(|(label, _, _)| SharedString::from(*label))
+            .map(|(label, _, _)| ChipOption {
+                label: SharedString::from(*label),
+                ratio: 0.0,
+            })
             .collect::<Vec<_>>(),
     ))));
     app.set_languages(ModelRc::from(Rc::new(VecModel::from(
@@ -258,6 +326,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
         words.on_lookup(|_, key| i18n::t(&key).into());
         words.on_lookup1(|_, key, a| i18n::tf(&key, &[&a]).into());
         words.on_lookup2(|_, key, a, b| i18n::tf(&key, &[&a, &b]).into());
+        // Uppercased here rather than in the tree: Slint has no text
+        // transform, and casing is the language's rule and not the
+        // interface's to guess at.
+        words.on_lookup_upper(|_, key| i18n::t(&key).to_uppercase().into());
         words.set_lang(i18n::current().into());
     }
 
@@ -357,14 +429,23 @@ pub fn run() -> Result<(), slint::PlatformError> {
     let editor = app.global::<Editor>();
 
     // ── the launch screen ──
+    app.on_start_compose(on_window!(|state| {
+        state.handle(Msg::Start(StartMsg::Compose));
+    }));
+    app.on_start_dismiss(on_window!(|state| {
+        state.handle(Msg::Start(StartMsg::Dismiss));
+    }));
     app.on_start_name_edited(on_window!(|state, name: SharedString| {
         state.handle(Msg::Start(StartMsg::NameEdited(name.to_string())));
     }));
     app.on_start_location_edited(on_window!(|state, path: SharedString| {
         state.handle(Msg::Start(StartMsg::LocationEdited(path.to_string())));
     }));
-    app.on_start_resolution_changed(on_window!(|state, index: i32| {
-        state.handle(Msg::Start(StartMsg::ResolutionChanged(index)));
+    app.on_start_aspect_changed(on_window!(|state, index: i32| {
+        state.handle(Msg::Start(StartMsg::AspectChanged(index)));
+    }));
+    app.on_start_size_changed(on_window!(|state, index: i32| {
+        state.handle(Msg::Start(StartMsg::SizeChanged(index)));
     }));
     app.on_start_rate_changed(on_window!(|state, index: i32| {
         state.handle(Msg::Start(StartMsg::RateChanged(index)));
@@ -387,6 +468,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
             state.handle(Msg::Start(StartMsg::Create(monitor)));
         })
     });
+    app.on_start_open(on_window!(|state| {
+        state.handle(Msg::Start(StartMsg::Open));
+    }));
     app.on_start_open_recent(on_window!(|state, path: SharedString| {
         state.handle(Msg::Start(StartMsg::OpenRecent(path.to_string())));
     }));
@@ -662,6 +746,23 @@ pub fn run() -> Result<(), slint::PlatformError> {
     editor.on_magnetic_changed(on_window!(|state, on: bool| {
         state.handle(Msg::Timeline(TimelineMsg::MagneticChanged(on)));
     }));
+    editor.on_trim_follow_changed(on_window!(|state, on: bool| {
+        state.handle(Msg::Timeline(TimelineMsg::TrimFollowChanged(on)));
+    }));
+    editor.on_preview_axis_changed(on_window!(|state, on: bool| {
+        state.handle(Msg::Timeline(TimelineMsg::PreviewAxisChanged(on)));
+    }));
+    editor.on_preview_axis_audio_changed(on_window!(|state, on: bool| {
+        state.handle(Msg::Timeline(TimelineMsg::PreviewAxisAudioChanged(on)));
+    }));
+    // The preview axis: on every move of the pointer across the lanes, so
+    // it publishes the lanes and no more, the way a scrub does.
+    editor.on_hovered(on_lanes!(|state, seconds: f32| {
+        state.handle(Msg::Timeline(TimelineMsg::Hovered(seconds)));
+    }));
+    editor.on_hover_ended(on_lanes!(|state| {
+        state.handle(Msg::Timeline(TimelineMsg::HoverEnded));
+    }));
     editor.on_add_track(on_window!(|state| {
         state.apply(concat_project::Command::AddTrack);
     }));
@@ -685,6 +786,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
     }));
 
     // ── the view ──
+    editor.on_key_mark_moved(on_lanes!(|state, from: f32, to: f32| {
+        state.move_keys_at(from, to);
+    }));
     editor.on_scrubbed(on_lanes!(|state, seconds: f32| {
         state.seek(seconds.max(0.0));
     }));
@@ -751,6 +855,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
     }));
     editor.on_band_selected(on_lanes!(
         |state, from: f32, to: f32, from_y: f32, to_y: f32, additive: bool| {
+            // As on a clip press and on the stage: what the inspector still
+            // holds for the selection lands before the selection moves. A
+            // press on the lanes' floor is the commonest way out of a
+            // title's text box, and it ends here, with the band it drew -
+            // usually an empty one that clears the selection.
+            state.flush_commit();
             let (from_row, to_row) = (state.row_at(from_y), state.row_at(to_y));
             let caught: Vec<String> = state
                 .timeline()
@@ -802,6 +912,41 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }));
         keys.on_clear_param(on_lanes!(|state, key: SharedString| {
             state.clear_adjust_keys(key.as_str());
+        }));
+    }
+    // The Keyframes panel's verbs; its rows go out with every publish.
+    {
+        let editor = app.global::<KeyEditor>();
+        editor.on_jump(on_lanes!(|state, at: f32| {
+            state.jump_to_key(at);
+        }));
+        editor.on_move_key(on_lanes!(|state,
+                                      field: ClipField,
+                                      param: SharedString,
+                                      from: f32,
+                                      to: f32| {
+            state.move_key(field, param.as_str(), from, to);
+        }));
+        editor.on_set_ease(on_lanes!(|state,
+                                      field: ClipField,
+                                      param: SharedString,
+                                      at: f32,
+                                      x1: f32,
+                                      y1: f32,
+                                      x2: f32,
+                                      y2: f32| {
+            state.set_key_ease(field, param.as_str(), at, [x1, y1, x2, y2]);
+        }));
+        editor.on_drag_key(on_lanes!(
+            |state, field: ClipField, param: SharedString, from: f32, to: f32, value: f32| {
+                state.drag_key(field, param.as_str(), from, to, value);
+            }
+        ));
+        editor.on_step_all(on_lanes!(|state, delta: i32| {
+            state.step_any_key(delta);
+        }));
+        editor.on_clear_all(on_lanes!(|state| {
+            state.clear_all_keys();
         }));
     }
 
@@ -934,6 +1079,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     // ── the context menu ──
     editor.on_clip_context(on_window!(|state, id: SharedString| {
         state.menu_token += 1;
+        state.menu_media = None;
         if state.clip(id.as_str()).is_none() {
             state.menu_target = None;
             return;
@@ -943,7 +1089,21 @@ pub fn run() -> Result<(), slint::PlatformError> {
         }
         state.menu_target = Some(id.to_string());
     }));
+    // The bin's cards share the menu's rows and token with the clips; which
+    // one was asked for is what the two targets below remember.
+    editor.on_media_context(on_window!(|state, row: i32| {
+        state.menu_token += 1;
+        state.menu_target = None;
+        state.menu_media = state
+            .media
+            .by_row(state.project(), row)
+            .map(|item| item.id.clone());
+    }));
     editor.on_menu_selected(on_window!(|state, action: SharedString| {
+        if let Some(id) = state.menu_media.clone() {
+            state.media_action(&id, action.as_str());
+            return;
+        }
         // The clip the menu was opened on; failing that, the one clip that
         // is selected, which is what the menu was showing anyway.
         let target = state.menu_target.clone().or_else(|| state.sole_selection());
@@ -965,7 +1125,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         .on_release(|| Shell::with(|_, app| app.invoke_blur()));
     editor.on_shortcut(move |action: SharedString| match action.as_str() {
         "import" | "export" | "settings" | "zoom-in" | "zoom-out" | "start" | "end" | "snap"
-        | "magnetic" => {
+        | "magnetic" | "pan" | "preview-axis" => {
             Shell::with(|_, app| app.invoke_app_menu_selected(action.clone()));
         }
         _ => Shell::with(|shell, app| {
@@ -1017,6 +1177,68 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 app.global::<Theme>().set_dark(dark);
                 let mut studio = shell.studio.borrow_mut();
                 studio.prefs.dark = Some(dark);
+                studio.prefs.save(&studio.host.dirs);
+            });
+        }
+    });
+    // The accent is the same shape of thing: one int on the Theme global,
+    // remembered under the name the global lists it by.
+    app.on_settings_accent_changed({
+        move |index| {
+            Shell::with(|shell, app| {
+                let theme = app.global::<Theme>();
+                let names = theme.get_accent_names();
+                let Some(name) = usize::try_from(index)
+                    .ok()
+                    .and_then(|row| slint::Model::row_data(&names, row))
+                else {
+                    return;
+                };
+                theme.set_accent_choice(index);
+                let mut studio = shell.studio.borrow_mut();
+                studio.prefs.accent = Some(prefs::Preferences::accent_id(&name));
+                studio.prefs.save(&studio.host.dirs);
+            });
+        }
+    });
+    // A picked colour is remembered as its hex, which is what tells it from
+    // a name when the file is read back. Every drag on the picker's square
+    // lands here, so the file is written often for a moment; it is small.
+    app.on_settings_accent_custom_changed({
+        move |colour| {
+            Shell::with(|shell, app| {
+                let theme = app.global::<Theme>();
+                let count = slint::Model::row_count(&theme.get_accent_names());
+                theme.set_accent_custom(colour);
+                theme.set_accent_choice(count as i32);
+                let mut studio = shell.studio.borrow_mut();
+                studio.prefs.accent = Some(format::hex_of(colour));
+                studio.prefs.save(&studio.host.dirs);
+            });
+        }
+    });
+    // The playhead's colour is the same shape of thing as the custom accent:
+    // a colour on the Theme global, remembered as its hex, behind a flag
+    // that says it is on. A reset clears the flag and forgets the hex, so
+    // the palette's own comes back and the file no longer names one.
+    app.on_settings_playhead_changed({
+        move |colour| {
+            Shell::with(|shell, app| {
+                let theme = app.global::<Theme>();
+                theme.set_playhead_custom(colour);
+                theme.set_playhead_is_custom(true);
+                let mut studio = shell.studio.borrow_mut();
+                studio.prefs.playhead = Some(format::hex_of(colour));
+                studio.prefs.save(&studio.host.dirs);
+            });
+        }
+    });
+    app.on_settings_playhead_reset({
+        move || {
+            Shell::with(|shell, app| {
+                app.global::<Theme>().set_playhead_is_custom(false);
+                let mut studio = shell.studio.borrow_mut();
+                studio.prefs.playhead = None;
                 studio.prefs.save(&studio.host.dirs);
             });
         }
@@ -1101,6 +1323,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
     app.on_settings_default_rate_changed(on_window!(|state, index: i32| {
         state.handle(Msg::Settings(SettingsMsg::DefaultRateChanged(index)));
     }));
+    app.on_settings_speech_accelerated_changed(on_window!(|state, on: bool| {
+        state.handle(Msg::Settings(SettingsMsg::SpeechAcceleratedChanged(on)));
+    }));
     app.on_settings_download_source_changed(on_window!(|state, index: i32| {
         state.handle(Msg::Settings(SettingsMsg::DownloadSourceChanged(index)));
     }));
@@ -1182,9 +1407,29 @@ pub fn run() -> Result<(), slint::PlatformError> {
     app.on_speech_model_changed(on_window!(|state, index: i32| {
         state.handle(Msg::Speech(SpeechMsg::ModelChanged(index)));
     }));
-    app.on_speech_pace_changed(on_window!(|state, index: i32| {
-        state.handle(Msg::Speech(SpeechMsg::PaceChanged(index)));
+    app.on_speech_speed_changed(on_window!(|state, value: f32| {
+        state.handle(Msg::Speech(SpeechMsg::SpeedChanged(value)));
     }));
+    app.on_speech_quality_changed(on_window!(|state, index: i32| {
+        state.handle(Msg::Speech(SpeechMsg::QualityChanged(index)));
+    }));
+    app.on_speech_pauses_changed(on_window!(|state, value: f32| {
+        state.handle(Msg::Speech(SpeechMsg::PausesChanged(value)));
+    }));
+    app.on_speech_reference_start_changed(on_window!(|state, seconds: f32| {
+        state.handle(Msg::Speech(SpeechMsg::ReferenceStartChanged(seconds)));
+    }));
+    app.on_speech_use_sample_changed(on_window!(|state, on: bool| {
+        state.handle(Msg::Speech(SpeechMsg::UseSampleChanged(on)));
+    }));
+    app.on_speech_sample_changed(on_window!(|state, index: i32| {
+        state.handle(Msg::Speech(SpeechMsg::SampleChanged(index)));
+    }));
+    // A string cut, and nothing of the window's: the sheet keeps the text,
+    // Rust only knows where a character starts.
+    app.on_speech_insert_tag(|text: SharedString, tag: SharedString, at: i32| {
+        panes::speech::insert_tag(text.as_str(), tag.as_str(), at.max(0) as usize).into()
+    });
     app.on_speech_begin(on_window!(|state| {
         state.handle(Msg::Speech(SpeechMsg::Begin));
     }));
@@ -1205,19 +1450,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     state.open_menu = -1;
                     match action.as_str() {
                         "add-selected" => state.handle(Msg::Media(MediaMsg::AddSelectedAtPlayhead)),
-                        "open" => {
-                            if let Some(path) = platform::pick_folder(&i18n::t("Open project"), "")
-                            {
-                                let concat_json = path.join("concat.json");
-                                if concat_json.exists() {
-                                    state.handle(Msg::Start(StartMsg::OpenRecent(
-                                        path.to_string_lossy().into_owned(),
-                                    )));
-                                } else {
-                                    state.notify("Not a valid project folder", true);
-                                }
-                            }
-                        }
+                        // The launch screen's own verb, from the menu bar:
+                        // the picker, the check and the notice are all one
+                        // implementation in panes/start.rs, so the two
+                        // cannot drift into disagreeing about what a project
+                        // folder is.
+                        "open" => state.handle(Msg::Start(StartMsg::Open)),
                         "import" => {
                             platform::pick_files_async(&i18n::t("Import media"), None, |paths| {
                                 on_ui(move |studio, _, _| {
@@ -1234,6 +1472,14 @@ pub fn run() -> Result<(), slint::PlatformError> {
                         "undo" => state.undo(),
                         "redo" => state.redo(),
                         "snap" => state.handle(Msg::Timeline(TimelineMsg::SnapToggled)),
+                        "pan" => {
+                            let on = !state.lanes.pan_mode;
+                            state.handle(Msg::Timeline(TimelineMsg::PanChanged(on)))
+                        }
+                        "preview-axis" => {
+                            let on = !state.prefs.preview_axis;
+                            state.handle(Msg::Timeline(TimelineMsg::PreviewAxisChanged(on)))
+                        }
                         "magnetic" => state.handle(Msg::Timeline(TimelineMsg::MagneticToggled)),
                         "sort-added" => state.handle(Msg::Media(MediaMsg::SortChanged(0))),
                         "sort-name" => state.handle(Msg::Media(MediaMsg::SortChanged(1))),
@@ -1287,6 +1533,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
             format::hex_of(value).into()
         }
     });
+    app.global::<Fmt>()
+        .on_hex_digits(|value| format::hex_of(value)[1..].into());
     app.global::<Fmt>()
         .on_color_of(|text, fallback| format::parse_colour(text.as_str()).unwrap_or(fallback));
     app.global::<Fmt>()

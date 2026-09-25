@@ -12,7 +12,7 @@
 /// Wider than MediaKind: a title has no file behind it, it *is* its content,
 /// and a filter has no file either — it is a preset dragged from the library's
 /// Filters page that covers a span of time and treats whatever plays under it,
-/// the way CapCut's filter bars do.
+/// the way a filter bar does in the consumer editors.
 export enum ClipKind { video, audio, image, text, filter }
 
 /// What a press on a clip means. One tool since the razor went - a cut
@@ -35,11 +35,11 @@ export struct TimelineTabData {
 ///
 /// `auto` is the default, and the only one that thinks: a lane is as tall as
 /// the tallest thing on it, so a lane of footage opens large, a lane of sound
-/// medium, and a lane of filter layers minimal. That is the shape CapCut gets
-/// by typing its tracks — arrived at here without typing them, which matters
-/// because these lanes are deliberately untyped and a mixed one still has to
-/// be right. The other three are the override, per lane, from the dropdown in
-/// its header.
+/// medium, and a lane of filter layers minimal. That is the shape a typed
+/// timeline gets by typing its tracks — arrived at here without typing them,
+/// which matters because these lanes are deliberately untyped and a mixed one
+/// still has to be right. The other three are the override, per lane, from
+/// the dropdown in its header.
 export enum TrackSize { auto, small, medium, large }
 
 /// One lane. Deliberately untyped: any media goes on any track, which is why
@@ -156,19 +156,21 @@ export enum TextAlignment { left, center, right }
 /// one per control.
 export enum ClipField {
     scale, offset-x, offset-y, rotation, stretch-x, stretch-y, opacity,
-    volume, speed, preserve-pitch, speed-curve, reverse, fade-in, fade-out,
-    anim-in, anim-out, anim-combo, anim-loop, anim-in-duration, anim-out-duration, anim-loop-duration,
+    volume, speed, preserve-pitch, fade-in, fade-out,
     flip-h, flip-v, blend, crop-left, crop-top, crop-right, crop-bottom,
     font-size, font-weight, italic, text-opacity, align,
     stroke-width, shadow, line-height, tracking, text-width, text-height,
     stroke-opacity,
+    /// the background's opacity is its colour's alpha, as the stroke's is;
+    /// its corner radius is a fraction of frame height
+    background-opacity, background-radius,
+    /// the air between the words and the background's edges, fractions of
+    /// frame height on each axis
+    background-padding-x, background-padding-y,
     cutout-feather,
     /// which of the media's audio tracks the clip plays, as a row of
     /// Editor.audio-tracks
     audio-track,
-    /// the levels the clip's file is read as: 0 as tagged, 1 limited,
-    /// 2 full. A property of the media, set from the clip.
-    color-range,
 }
 
 /// One keyable property's state at the playhead, as the inspector needs it.
@@ -287,21 +289,6 @@ export struct SelectedClipData {
     audio-track: int,
     speed: float,
     preserve-pitch: bool,
-    /// Which preset shape the speed curve is: -1 for a constant rate, the
-    /// presets' count for a custom shape.
-    speed-curve: int,
-    reverse: bool,
-
-    // animation — a shape per slot, as an index into the slot's list, or
-    // -1 for none; the seconds the head and tail shapes take
-    anim-in: int,
-    anim-out: int,
-    anim-combo: int,
-    anim-loop: int,
-    anim-in-duration: float,
-    anim-out-duration: float,
-    anim-loop-duration: float,
-
     // the picture's edges and colour
     flip-h: bool,
     flip-v: bool,
@@ -333,11 +320,9 @@ export struct SelectedClipData {
     // than frames being restored
     enhance-progress: float,
     enhance-fetching: bool,
-
-    // the levels the clip's media is read as: 0 as the file is tagged,
-    // 1 limited, 2 full; -1 for a clip with no picture file behind it,
-    // which hides the control
-    color-range: int,
+    /// Reverse writing this clip's backwards copy: -1 when it is not,
+    /// else how far along
+    reverse-progress: float,
 
     // the overlay, when this is a text clip
     content: string,
@@ -356,10 +341,19 @@ export struct SelectedClipData {
     /// the stroke colour's alpha, 0..1, as its own dial
     stroke-opacity: float,
     shadow: bool,
-    /// the plate behind the words; fully transparent means no plate
+    /// the background behind the words - the plate, to the painter; fully
+    /// transparent means none
     plate: color,
     plate-hex: string,
     plated: bool,
+    /// the background colour's alpha, 0..1, as its own dial
+    plate-opacity: float,
+    /// the background's corner radius as a fraction of frame height
+    plate-radius: float,
+    /// the background's air either side of and above the words, as
+    /// fractions of frame height
+    plate-padding-x: float,
+    plate-padding-y: float,
     line-height: float,
     tracking: float,
     /// the widest a line runs before wrapping, as a fraction of the frame;

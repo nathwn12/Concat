@@ -171,10 +171,14 @@ export component Button inherits Rectangle {
     in property <bool> block;
     /// 34px instead of 28px, for the action a sheet is built around
     in property <bool> large;
+    /// A glyph alone on a square the height of the row, for a toggle that
+    /// sits beside a field and says what it does with its mark: the eye
+    /// that shows a token. The label, if one is given, is not drawn.
+    in property <bool> square;
 
     callback clicked();
 
-    property <length> gap: root.glyph == Glyph.none ? 0px : 6px;
+    property <length> gap: (root.glyph == Glyph.none || root.square) ? 0px : 6px;
     property <length> mark: root.glyph == Glyph.none ? 0px : 14px;
     property <bool> lit: touch.has-hover && root.enabled;
     /// the red the danger tone hovers into — a dark wash, not a fill
@@ -188,7 +192,9 @@ export component Button inherits Rectangle {
     // below sizes the label from this button's width, so reading back the
     // result is a loop.
     min-width: root.block ? 0px
+        : root.square ? (root.large ? 34px : 28px)
         : text.preferred-width + root.mark + root.gap + (root.large ? 32px : 24px);
+    max-width: root.square ? (root.large ? 34px : 28px) : 100000px;
     border-radius: Theme.r;
     opacity: root.enabled ? 1.0 : 0.45;
     border-width: root.ghost ? 0px : 1px;
@@ -222,7 +228,7 @@ export component Button inherits Rectangle {
         }
 
         text := Text {
-            text: root.label;
+            text: root.square ? "" : root.label;
             color: root.ink;
             font-size: root.large ? Theme.fs-lg : Theme.fs;
             font-weight: Theme.weight-title;
@@ -338,6 +344,15 @@ export component DialogSection inherits VerticalLayout {
     /// a question mark beside the title: read on hover, out of the way
     /// otherwise.
     in property <string> hint;
+    /// A switch at the header's far end, for a group that is a feature to
+    /// turn on rather than a set of settings that are always there. The
+    /// switch draws `on` and reports a press through `switched`; it keeps
+    /// no state of its own, so the caller's data stays the one truth and
+    /// a reopened sheet cannot disagree with it. Bind `open` to the same
+    /// value to fold the body away while it is off.
+    in property <bool> switchable;
+    in property <bool> on;
+    callback switched(on: bool);
 
     if !root.first: Rectangle {
         height: 1px;
@@ -416,6 +431,37 @@ export component DialogSection inherits VerticalLayout {
                 vertical-alignment: center;
                 overflow: elide;
             }
+
+            // The same pill as the inspector's Switch, drawn from `on`
+            // rather than holding a checked state of its own.
+            if root.switchable: VerticalLayout {
+                alignment: center;
+
+                Rectangle {
+                    width: 30px;
+                    height: 17px;
+                    border-radius: self.height / 2;
+                    background: root.on ? Theme.accent : Theme.field-active;
+
+                    animate background { duration: 120ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+
+                    Rectangle {
+                        x: root.on ? parent.width - self.width - 2px : 2px;
+                        y: (parent.height - self.height) / 2;
+                        width: 13px;
+                        height: 13px;
+                        border-radius: self.width / 2;
+                        background: Theme.on-accent;
+
+                        animate x { duration: 120ms; easing: cubic-bezier(0.4, 0, 0.2, 1); }
+                    }
+
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.switched(!root.on); }
+                    }
+                }
+            }
         }
     }
 
@@ -476,6 +522,10 @@ export component Field inherits Rectangle {
     in property <string> placeholder;
     /// numbers, paths and names read better in the technical face
     in property <bool> technical;
+    /// Drawn as dots, the way a password field is: for a token that is
+    /// shown on a screen other people can see. What is typed and what
+    /// `edited` reports are the real characters either way.
+    in property <bool> secret;
     /// The corners, a side at a time, so two fields can be joined into
     /// one control with a square seam between them.
     in property <length> radius-left: Theme.r;
@@ -536,6 +586,7 @@ export component Field inherits Rectangle {
         // same reason, as SearchField in the inspector.
         height: self.preferred-height;
         text <=> root.draft;
+        input-type: root.secret ? InputType.password : InputType.text;
         color: Theme.fg;
         font-family: root.technical ? Theme.font-technical : Theme.font;
         font-size: Theme.fs;

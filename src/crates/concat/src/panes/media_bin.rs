@@ -16,10 +16,10 @@ use std::path::PathBuf;
 
 use concat_host::media::{self, MediaSummary};
 use concat_project::Command;
-use concat_project::model::{self, MediaItem, Project};
+use concat_project::model::{self, MediaItem, MediaOrigin, Project};
 
 use crate::format::wave_path;
-use crate::host::{probe_error, spawn};
+use crate::host::{probe_error, spawn_in_project};
 use crate::i18n::{t, tf};
 use crate::panes::Msg;
 use crate::studio::Studio;
@@ -68,6 +68,11 @@ pub struct MediaBin {
     pub sort: usize,
     /// The cards' pictures by media id.
     pub thumbs: HashMap<String, slint::Image>,
+    /// A card's waveform path by media id, with the peaks it was drawn
+    /// from and the duration it spans: the rows are rebuilt on every
+    /// publish, thirty times a second in playback, and the path is the
+    /// one expensive line of a row.
+    waves: std::cell::RefCell<HashMap<String, (usize, f32, slint::SharedString)>>,
 }
 
 impl Default for MediaBin {
@@ -79,6 +84,7 @@ impl Default for MediaBin {
             filter: MediaFilter::All,
             sort: 0,
             thumbs: HashMap::new(),
+            waves: Default::default(),
         }
     }
 }
@@ -140,7 +146,7 @@ impl MediaBin {
                 if paths.is_empty() || studio.session.is_none() {
                     return;
                 }
-                spawn(
+                spawn_in_project(
                     move || {
                         paths
                             .iter()
@@ -211,13 +217,24 @@ impl MediaBin {
         project.media_by_id(id)
     }
 
-    /// Whether the filter lets an item of this kind through.
-    fn shows(filter: MediaFilter, kind: model::MediaKind) -> bool {
+    /// The row an id is shown at, for a message that names rows.
+    pub fn row_of(&self, id: &str) -> Option<i32> {
+        self.rows.get(id).copied()
+    }
+
+    /// Whether the filter lets an item through. The Media shelves, "All
+    /// media" included, are the imports: a file the editor made is on its
+    /// origin's shelf under Generated and nowhere else, so a read-aloud
+    /// voice is not also the fifth thing under Audio.
+    fn shows(filter: MediaFilter, item: &MediaItem) -> bool {
+        let imported = item.origin.is_none();
         match filter {
-            MediaFilter::All => true,
-            MediaFilter::Video => kind == model::MediaKind::Video,
-            MediaFilter::Audio => kind == model::MediaKind::Audio,
-            MediaFilter::Images => kind == model::MediaKind::Image,
+            MediaFilter::All => imported,
+            MediaFilter::Video => imported && item.kind == model::MediaKind::Video,
+            MediaFilter::Audio => imported && item.kind == model::MediaKind::Audio,
+            MediaFilter::Images => imported && item.kind == model::MediaKind::Image,
+            MediaFilter::Speech => item.origin == Some(MediaOrigin::Speech),
+            MediaFilter::Processed => item.origin == Some(MediaOrigin::Processed),
         }
     }
 
@@ -251,7 +268,7 @@ impl MediaBin {
             HashSet::new()
         };
         for item in &project.media {
-            if !Self::shows(self.filter, item.kind) {
+            if !Self::shows(self.filter, item) {
                 continue;
             }
             let (row, col) = (cell / columns.max(1), cell % columns.max(1));
@@ -268,12 +285,12 @@ impl MediaBin {
         let mut visible: Vec<&MediaItem> = project
             .media
             .iter()
-            .filter(|item| Self::shows(self.filter, item.kind))
+            .filter(|item| Self::shows(self.filter, item))
             .collect();
         match self.sort {
             // Added: the import order, as the document keeps it.
             0 => {}
-            1 => visible.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())),
+            1 => visible.sort_by_key(|item| item.name.to_lowercase()),
             // Video, then audio, then stills; each by name.
             2 => visible.sort_by(|a, b| {
                 let rank = |kind: model::MediaKind| match kind {
@@ -300,9 +317,24 @@ impl MediaBin {
                 // that size - fuller than a lane's candles, on purpose.
                 let wave = match studio.peaks.get(&item.id) {
                     Some(peaks) if item.kind == model::MediaKind::Audio => {
-                        wave_path(peaks, 0.0, item.duration.unwrap_or(0.0) as f32, 64, 0.75)
+                        let duration = item.duration.unwrap_or(0.0) as f32;
+                        let drawn_from = std::sync::Arc::as_ptr(peaks) as usize;
+                        let mut waves = self.waves.borrow_mut();
+                        match waves.get(&item.id) {
+                            Some((from, span, path))
+                                if *from == drawn_from && *span == duration =>
+                            {
+                                path.clone()
+                            }
+                            _ => {
+                                let path: slint::SharedString =
+                                    wave_path(peaks, 0.0, duration, 64, 0.75).as_str().into();
+                                waves.insert(item.id.clone(), (drawn_from, duration, path.clone()));
+                                path
+                            }
+                        }
                     }
-                    _ => String::new(),
+                    _ => slint::SharedString::default(),
                 };
                 MediaItemData {
                     id: *self.rows.get(&item.id).unwrap_or(&0),
@@ -316,7 +348,7 @@ impl MediaBin {
                         .unwrap_or_default()
                         .into(),
                     thumbnail: self.thumbs.get(&item.id).cloned().unwrap_or_default(),
-                    wave: wave.as_str().into(),
+                    wave,
                     selected: self.selected.contains(&item.id),
                 }
             })
@@ -404,6 +436,39 @@ mod tests {
             4,
             "an unknown sort keeps the order"
         );
+    }
+
+    #[test]
+    fn a_generated_voice_is_on_its_own_shelf_and_no_other() {
+        let mut bin = MediaBin::default();
+        let mut project = project();
+        project.media.push(MediaItem {
+            id: "s1".to_owned(),
+            name: "Voice 1.wav".to_owned(),
+            kind: Kind::Audio,
+            origin: Some(MediaOrigin::Speech),
+            ..MediaItem::default()
+        });
+        let names = |bin: &MediaBin| -> Vec<String> {
+            bin.visible(&project)
+                .iter()
+                .map(|item| item.name.clone())
+                .collect()
+        };
+        // Not under All media, not under Audio, though it is audio.
+        bin.filter = MediaFilter::All;
+        assert_eq!(names(&bin).len(), 4, "the imports, and only them");
+        bin.filter = MediaFilter::Audio;
+        assert_eq!(names(&bin), ["alpha.wav"]);
+        bin.filter = MediaFilter::Speech;
+        assert_eq!(names(&bin), ["Voice 1.wav"]);
+        // A marquee on the Speech shelf walks the Speech shelf.
+        let caught = bin.band(&project, 3, (0, 2), (0, 0), false);
+        assert_eq!(caught.len(), 1);
+        assert!(caught.contains("s1"));
+        // Rows are minted for it like any other, so a drag can name it.
+        bin.assign_rows(&project);
+        assert_eq!(bin.by_row(&project, 5).expect("row 5").id, "s1");
     }
 
     #[test]

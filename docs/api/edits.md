@@ -38,7 +38,6 @@ edit; `createdId` names what the command made, if anything.
 | [`setClipTransform`](#setcliptransform) | scale, offset, rotation, stretch | |
 | [`setClipSpeed`](#setclipspeed) | playback rate | |
 | [`setClipSpeedCurve`](#setclipspeedcurve) | speed over time | |
-| [`setClipAnimation`](#setclipanimation) | a named in/out/combo/loop shape | |
 | [`setClipKey`](#setclipkey) · [`clearClipKey`](#clearclipkey) · [`clearClipKeys`](#clearclipkeys) | keyframes on scale, offset, rotation, opacity, volume | |
 | [`setEffectKey`](#seteffectkey) · [`clearEffectKey`](#cleareffectkey) · [`clearEffectKeys`](#cleareffectkeys) | keyframes on an effect parameter | |
 | [`setClipCutout`](#setclipcutout) · [`addCutoutStroke`](#addcutoutstroke) | background removal and brush corrections | |
@@ -149,13 +148,15 @@ the export alike. Stored in the document; absent means "as tagged".
 ### `replaceClipMedia`
 
 Points a clip at another file, adding it to the bin first if it is not
-there. The clip keeps its in-point, length, looks and name; the copy stands
-in frame for frame. The bin keeps the original.
+there. The clip keeps its length, looks and name, and its in-point unless
+`sourceStart` moves it: an enhanced copy stands in frame for frame, a
+reversed span starts at its own zero. The bin keeps the original.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `clipId` | string | The clip. Unknown id: no-op |
 | `item` | *NewMedia* | The probed file |
+| `sourceStart` | number | *optional*. A new in-point in the copy, in seconds |
 
 ---
 
@@ -197,7 +198,7 @@ first line.
 | Field | Type | Meaning |
 |---|---|---|
 | `trackId` | string | *optional*. The lane. Absent picks a free track; a vanished track is **refused** |
-| `above` | bool | *optional*, default `false`. With no `trackId`: land on the first free lane *above* the highest occupied one, minting a lane at the top if needed. What captions use |
+| `above` | bool | *optional*, default `false`. With no `trackId`: land on the first free lane *above* the highest occupied one, minting a lane at the top if needed. What the editor does for its own titles and captions |
 | `start` | number | Seconds; floored at 0 |
 | `style` | *TextStyle* | *optional*. Only the fields you set; the rest are the window's defaults. `{"content": "Hello"}` is enough |
 | `duration` | number | *optional*, default 4 s |
@@ -326,7 +327,6 @@ Applies a patch: only the fields present change.
 | `opacity` | number | 0..=1 |
 | `preservePitch` | bool | Keep voices at pitch when speed ≠ 1 |
 | `muted` | bool | Silence the clip's own sound |
-| `reverse` | bool | Play backwards |
 | `flipH`, `flipV` | bool | Mirror |
 | `blend` | string | `normal` (or empty), `multiply`, `screen`, `add`, `lighten`, `darken` |
 | `filters` | *AppliedFilter*[] | **Replaces** the whole audio chain |
@@ -376,16 +376,6 @@ Speed that changes over the clip.
 |---|---|---|
 | `clipId` | string | The clip |
 | `curve` | *SpeedPoint*[] or `null` | Points of `{at, speed}`, `at` a fraction 0..=1 of the clip. `null` returns to a constant rate at the current mean |
-
-### `setClipAnimation`
-
-A named shape on one slot of the clip.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `clipId` | string | The clip |
-| `slot` | `"in"`, `"out"`, `"combo"`, `"loop"` | Which slot |
-| `animation` | `{preset, duration}` or `null` | `preset` is a name the inspector's menu offers for that slot (e.g. `"Fade"`, `"Zoom In"`, `"Slide Up"`, `"Pulse"`, `"Shake"`); `duration` in seconds for in/out. `null` takes it off |
 
 ### `setClipKey`
 

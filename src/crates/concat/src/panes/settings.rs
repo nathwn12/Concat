@@ -48,6 +48,8 @@ pub enum SettingsMsg {
     /// rate list.
     DefaultRateChanged(i32),
     HardwareDecodeChanged(bool),
+    /// The voices run on the accelerator.
+    SpeechAcceleratedChanged(bool),
     DownloadSourceChanged(i32),
     DownloadBaseEdited(String),
     ServerEnabledChanged(bool),
@@ -140,10 +142,12 @@ pub struct SettingsPane {
     pub language: usize,
     /// The switch that keeps the playhead inside the content.
     pub playhead_stops: bool,
-    /// Show flip/reverse in clip context menu.
+    /// Show flip in clip context menu.
     pub custom_context_actions: bool,
     /// Video decodes on the platform's hardware.
     pub hardware_decode: bool,
+    /// The voices run on the machine's accelerator.
+    pub speech_accelerated: bool,
     /// Index into `SourcePreference::ALL`: where model downloads look first.
     pub download_source: usize,
     /// The base URL of a custom download source.
@@ -174,6 +178,8 @@ impl SettingsPane {
                 self.custom_context_actions = studio.prefs.custom_context_actions;
                 self.hardware_decode = studio.prefs.hardware_decode_on();
                 concat_media::set_hardware_decode(self.hardware_decode);
+                self.speech_accelerated = studio.prefs.speech_accelerated;
+                concat_speech::set_accelerated(self.speech_accelerated);
                 self.download_source = Self::download_source(studio).0;
                 self.download_base = studio.prefs.download_base.clone().unwrap_or_default();
                 Self::apply_download_source(studio);
@@ -243,6 +249,14 @@ impl SettingsPane {
                 studio.prefs.default_rate_den = Some(den);
                 studio.prefs.save(&studio.host.dirs);
                 studio.start = crate::panes::start::StartPane::new(&studio.prefs);
+            }
+            SettingsMsg::SpeechAcceleratedChanged(on) => {
+                self.speech_accelerated = on;
+                studio.prefs.speech_accelerated = on;
+                studio.prefs.save(&studio.host.dirs);
+                // An engine already loaded the other way is loaded again on
+                // the next read; nothing running is disturbed.
+                concat_speech::set_accelerated(on);
             }
             SettingsMsg::HardwareDecodeChanged(on) => {
                 self.hardware_decode = on;
@@ -388,6 +402,8 @@ impl SettingsPane {
             server.stop();
         }
         self.server_error.clear();
+        let exporter = studio.host.exporter.clone();
+        let open_projects = studio.host.open_projects.clone();
         let prefs = &studio.prefs.server;
         if !prefs.enabled {
             return;
@@ -408,7 +424,15 @@ impl SettingsPane {
                     token: Some(prefs.token.clone()).filter(|token| !token.is_empty()),
                     ..concat_server::Config::default()
                 };
-                concat_server::Server::start(config, concat_api::Api::new)
+                // The window's export slot and its register of open
+                // projects, so one export at a time holds across the two
+                // and a caller never edits the project on screen.
+                concat_server::Server::start(config, move |events| {
+                    let mut api = concat_api::Api::new(events)?;
+                    api.share_exporter(exporter);
+                    api.share_open_projects(open_projects);
+                    Ok(api)
+                })
             });
         match started {
             Ok(server) => studio.host.server = Some(server),
@@ -589,6 +613,8 @@ impl SettingsPane {
                     .unwrap_or(3) as i32
             },
             hardware_decode: self.hardware_decode,
+            speech_accelerated: self.speech_accelerated,
+            speech_acceleration_offered: concat_speech::acceleration_offered(),
             hardware_decode_offered: concat_media::HwDevice::platform_default()
                 .is_some_and(concat_media::HwDevice::linked),
             download_source: self.download_source as i32,
@@ -616,7 +642,6 @@ impl SettingsPane {
                 .into()
             },
             version: env!("CARGO_PKG_VERSION").into(),
-            engine: format!("concat-engine · FFmpeg {}", concat_media::linked_version()).into(),
         }
     }
 }
@@ -691,9 +716,17 @@ mod tests {
 /// a port that is not a number, gets the default port; an empty host gets
 /// loopback.
 pub fn split_listen(listen: &str) -> (String, u16) {
-    let (default_host, default_port) =
-        split_once_port(prefs::DEFAULT_LISTEN).unwrap_or(("127.0.0.1", 7420));
-    let (host, port) = split_once_port(listen.trim()).unwrap_or((listen.trim(), default_port));
+    let (default_host, default_port) = match split_once_port(prefs::DEFAULT_LISTEN) {
+        Some((host, Some(port))) => (host, port),
+        _ => ("127.0.0.1", 7420),
+    };
+    let listen = listen.trim();
+    // A host with a port that does not parse keeps the host: "host:" or
+    // "host:abc" is a host and the default port, not a host of that name.
+    let (host, port) = match split_once_port(listen) {
+        Some((host, port)) => (host, port.unwrap_or(default_port)),
+        None => (listen, default_port),
+    };
     let host = host.trim();
     (
         if host.is_empty() {
@@ -705,15 +738,17 @@ pub fn split_listen(listen: &str) -> (String, u16) {
     )
 }
 
-/// `host:port` when the port parses, else `None`.
-fn split_once_port(listen: &str) -> Option<(&str, u16)> {
+/// The host before the last colon and the port after it, when there is
+/// such a place for a port: `None` for text with no colon or a bare IPv6
+/// address, and a `None` port when what follows the colon is not one.
+fn split_once_port(listen: &str) -> Option<(&str, Option<u16>)> {
     let (host, port) = listen.rsplit_once(':')?;
     // "::1" with no brackets is all colons; only a bracketed IPv6 host, or
     // a plain host, has a port after its last colon.
     if host.contains(':') && !host.ends_with(']') {
         return None;
     }
-    Some((host, port.trim().parse().ok()?))
+    Some((host, port.trim().parse().ok()))
 }
 
 /// The inverse of [`split_listen`]: the one string the server binds.

@@ -29,8 +29,8 @@ import { CaptionsDialog, CaptionsSheetData } from "dialogs/captions.slint";
 import { SpeechDialog, SpeechSheetData } from "dialogs/speech.slint";
 import { DockDivider, DockSide, SeatBox } from "dock.slint";
 import { Editor } from "editor.slint";
-import { PaneKind } from "workspace/pane-switcher.slint";
-import { RecentProjectData, StartData, StartScreen } from "start.slint";
+import { PaneKind, Panes } from "workspace/pane-switcher.slint";
+import { ChipOption, NewProjectDialog, RecentProjectData, StartData, StartScreen } from "start.slint";
 import { TitleBar } from "title-bar.slint";
 import {
     AppliedEntryData, AppliedParamData, CatalogueEntryData, Library, LibraryViewData,
@@ -46,15 +46,18 @@ import {
 } from "timeline/model.slint";
 
 // Re-exported so main.rs can reach the globals and the struct.
+import { KeyEditor, KeyMarkData, KeyRowData } from "workspace/keyframes-pane.slint";
+
 export {
     Curves, Fmt, Focus, Payload, Theme, Bezier, Editor, I18n,
     AppliedEntryData, AppliedParamData, CatalogueEntryData, Library, LibraryViewData, ParamFormat,
     DockDivider, DockSide, PaneKind, SeatBox,
     EffectData, MediaFilter, MediaItemData, MediaKind, TextPresetData,
     ClipData, ClipField, ClipKeyData, ClipKind, ClipTextField, DropData, Keyframes,
+    KeyEditor, KeyMarkData, KeyRowData,
     SelectedClipData, StageGuideData, StageItemData, TextAlignment, TimelineTabData,
     TimelineTool, TrackData, TrackSize, MenuItemData, MenuRow, ExportData, ExportPhase, ModelData, SettingsData,
-    RecentProjectData, StartData, SystemFactData, ToastData, ProjectSheetData,
+    ChipOption, RecentProjectData, StartData, SystemFactData, ToastData, ProjectSheetData,
     CaptionsSheetData, SpeechSheetData,
 }
 
@@ -99,7 +102,8 @@ export component App inherits Window {
         }
     }
     property <bool> sheet-open: root.export.open || root.settings.open
-        || root.project-sheet.open || root.captions.open || root.speech.open;
+        || root.project-sheet.open || root.captions.open || root.speech.open
+        || root.start.composing;
     changed sheet-open => {
         if (!root.sheet-open) {
             keys.focus();
@@ -118,16 +122,23 @@ export component App inherits Window {
     // bound rather than during the window's own construction.
     in property <bool> on-start: true;
     in property <StartData> start;
-    in property <[string]> start-resolutions;
-    in property <[string]> start-rates;
+    in property <[ChipOption]> start-aspects;
+    in property <[ChipOption]> start-sizes;
+    in property <[ChipOption]> start-rates;
     in property <[RecentProjectData]> recents;
 
+    /// Put up the new-project sheet, and take it down again.
+    callback start-compose();
+    callback start-dismiss();
     callback start-name-edited(name: string);
     callback start-location-edited(path: string);
     callback start-browse();
-    callback start-resolution-changed(index: int);
+    callback start-aspect-changed(index: int);
+    callback start-size-changed(index: int);
     callback start-rate-changed(index: int);
     callback start-create();
+    /// Open a project that already exists, picked from disk.
+    callback start-open();
     callback start-open-recent(path: string);
     callback start-forget-recent(path: string);
     callback start-dismiss-error();
@@ -162,7 +173,14 @@ export component App inherits Window {
     in-out property <bool> window-maximized;
     callback window-resized();
     changed width => { root.window-resized(); }
-    changed height => { root.window-resized(); }
+    // The height goes to the Panes global as well: the menus hung under the
+    // pane buttons measure the room beneath them against it, and nothing
+    // below the Window can read the Window.
+    changed height => {
+        Panes.window-height = self.height;
+        root.window-resized();
+    }
+    init => { Panes.window-height = self.height; }
     // The dialogs. Both are held at the root because Slint has no portal: a
     // modal has to be declared where it is drawn, and it is drawn over
     // everything.
@@ -199,12 +217,17 @@ export component App inherits Window {
     callback settings-show-log();
     callback settings-language-changed(index: int);
     callback settings-theme-changed(dark: bool);
+    callback settings-accent-changed(index: int);
+    callback settings-accent-custom-changed(colour: color);
+    callback settings-playhead-changed(colour: color);
+    callback settings-playhead-reset();
     callback settings-playhead-stops-changed(on: bool);
     callback settings-custom-context-actions-changed(on: bool);
     callback settings-magnetic-changed(on: bool);
     callback settings-hardware-decode-changed(on: bool);
     callback settings-auto-resolution-changed(on: bool);
     callback settings-default-rate-changed(rate: int);
+    callback settings-speech-accelerated-changed(on: bool);
     callback settings-download-source-changed(index: int);
     callback settings-download-base-edited(text: string);
     callback settings-server-enabled-changed(on: bool);
@@ -243,20 +266,36 @@ export component App inherits Window {
 
     in property <SpeechSheetData> speech;
     in property <[string]> speech-models;
+    in property <[string]> speech-model-details;
     in property <[string]> speech-voices;
     in property <[string]> speech-voice-details;
+    /// The recordings in the bin a voice can be taken from: their names,
+    /// their waveforms as path commands, and their lengths.
+    in property <[string]> speech-samples;
+    in property <[string]> speech-sample-waves;
+    in property <[string]> speech-sample-details;
     callback speech-closed();
     callback speech-text-edited(text: string);
     callback speech-voice-changed(index: int);
     callback speech-model-changed(index: int);
-    callback speech-pace-changed(index: int);
+    callback speech-speed-changed(value: float);
+    callback speech-quality-changed(index: int);
+    callback speech-pauses-changed(value: float);
+    callback speech-reference-start-changed(seconds: float);
+    callback speech-use-sample-changed(on: bool);
+    callback speech-sample-changed(index: int);
+    /// See SpeechDialog.insert-tag: a string cut Rust does for the sheet.
+    pure callback speech-insert-tag(text: string, tag: string, at: int) -> string;
     callback speech-begin();
     callback speech-cancel();
 
     /// Takes focus back from whatever field holds it. The keyboard scope is
     /// where focus rests when nothing is being typed into, so giving it the
-    /// focus is what "click beside the field" means; Rust calls this for
-    /// every press a pane reports through Editor.blur.
+    /// focus is what "click beside the field" means. Rust calls this for
+    /// every press a pane reports through Editor.blur, and - from the raw
+    /// window events, before Slint routes the press (platform.rs) - for
+    /// every press that is not on the text input holding the focus, so a
+    /// click on a clip, a knob or the monitor ends the editing too.
     public function blur() {
         keys.focus();
     }
@@ -328,12 +367,13 @@ export component App inherits Window {
             activated => { root.app-menu-selected("redo"); }
         }
 
-        // The rest of the keyboard, the way CapCut lays it out: the chord
-        // key with a letter for an edit, a bare letter for a tool, the
-        // arrows and Home/End for the playhead. Every one lands here only
-        // when nothing else took it - a field being typed into consumes
-        // its own letters and spaces before a key can walk up to this
-        // scope, which is what keeps typing a title from cutting a clip.
+        // The rest of the keyboard, laid out the way every editor has
+        // taught its users: the chord key with a letter for an edit, a
+        // bare letter for a tool, the arrows and Home/End for the
+        // playhead. Every one lands here only when nothing else took it -
+        // a field being typed into consumes its own letters and spaces
+        // before a key can walk up to this scope, which is what keeps
+        // typing a title from cutting a clip.
         key-pressed(event) => {
             if (root.on-start) {
                 return reject;
@@ -394,10 +434,14 @@ export component App inherits Window {
             // the two did the same thing by different pointers.
             if (event.text == "b") { Editor.shortcut("split-selected"); return accept; }
             if (event.text == "n") { Editor.shortcut("snap"); return accept; }
+            if (event.text == "s") { Editor.shortcut("preview-axis"); return accept; }
             if (event.text == "m") { Editor.shortcut("mute"); return accept; }
-            if (event.text == "h") { Editor.shortcut("flip-h"); return accept; }
+            // H is the hand: the pan tool, on and off, the key every
+            // editor's canvas grabs with. Flip horizontal had it and lost
+            // it; that is still on the clip's menu, and J still flips
+            // vertically.
+            if (event.text == "h") { Editor.shortcut("pan"); return accept; }
             if (event.text == "j") { Editor.shortcut("flip-v"); return accept; }
-            if (event.text == "r") { Editor.shortcut("reverse"); return accept; }
             return reject;
         }
 
@@ -417,6 +461,7 @@ export component App inherits Window {
             TitleBar {
                 macos: root.macos;
                 minimal: root.on-start;
+                deep: root.on-start;
                 project-name: root.project-name;
                 status: root.project-status;
 
@@ -443,20 +488,14 @@ export component App inherits Window {
             if root.on-start: StartScreen {
                 vertical-stretch: 1;
 
-                data: root.start;
-                resolutions: root.start-resolutions;
-                rates: root.start-rates;
                 recents: root.recents;
+                busy: root.start.busy;
 
-                name-edited(name) => { root.start-name-edited(name); }
-                location-edited(path) => { root.start-location-edited(path); }
-                browse => { root.start-browse(); }
-                resolution-changed(index) => { root.start-resolution-changed(index); }
-                rate-changed(index) => { root.start-rate-changed(index); }
-                create => { root.start-create(); }
+                compose => { root.start-compose(); }
+                open => { root.start-open(); }
+                open-settings => { root.open-settings(); }
                 open-recent(path) => { root.start-open-recent(path); }
                 forget-recent(path) => { root.start-forget-recent(path); }
-                dismiss-error => { root.start-dismiss-error(); }
             }
 
             // Everything the workspace shows now reads the Editor global, so
@@ -472,6 +511,32 @@ export component App inherits Window {
     // Declared last, and that is load-bearing: Slint paints siblings in
     // declaration order, so a modal placed above the workspace in the file is
     // painted *under* it on screen — open, correct, and completely hidden.
+    //
+    // The launch screen's sheet first among them. Settings is the only other
+    // sheet the launch screen can put up, and never at the same time — the
+    // scrim keeps the rail from being pressed — so the order between the two
+    // decides nothing and this one reads first because it comes first.
+    NewProjectDialog {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        data: root.start;
+        aspects: root.start-aspects;
+        sizes: root.start-sizes;
+        rates: root.start-rates;
+
+        closed => { root.start-dismiss(); }
+        name-edited(name) => { root.start-name-edited(name); }
+        location-edited(path) => { root.start-location-edited(path); }
+        browse => { root.start-browse(); }
+        aspect-changed(index) => { root.start-aspect-changed(index); }
+        size-changed(index) => { root.start-size-changed(index); }
+        rate-changed(index) => { root.start-rate-changed(index); }
+        create => { root.start-create(); }
+        dismiss-error => { root.start-dismiss-error(); }
+    }
+
     ExportDialog {
         x: 0;
         y: 0;
@@ -514,12 +579,17 @@ export component App inherits Window {
         show-log => { root.settings-show-log(); }
         language-changed(index) => { root.settings-language-changed(index); }
         theme-changed(dark) => { root.settings-theme-changed(dark); }
+        accent-changed(index) => { root.settings-accent-changed(index); }
+        accent-custom-changed(colour) => { root.settings-accent-custom-changed(colour); }
+        playhead-changed(colour) => { root.settings-playhead-changed(colour); }
+        playhead-reset => { root.settings-playhead-reset(); }
         playhead-stops-changed(on) => { root.settings-playhead-stops-changed(on); }
         custom-context-actions-changed(on) => { root.settings-custom-context-actions-changed(on); }
         magnetic-changed(on) => { root.settings-magnetic-changed(on); }
         hardware-decode-changed(on) => { root.settings-hardware-decode-changed(on); }
         auto-resolution-changed(on) => { root.settings-auto-resolution-changed(on); }
         default-rate-changed(rate) => { root.settings-default-rate-changed(rate); }
+        speech-accelerated-changed(on) => { root.settings-speech-accelerated-changed(on); }
         download-source-changed(index) => { root.settings-download-source-changed(index); }
         download-base-edited(text) => { root.settings-download-base-edited(text); }
         server-enabled-changed(on) => { root.settings-server-enabled-changed(on); }
@@ -582,14 +652,24 @@ export component App inherits Window {
         height: root.height;
         data: root.speech;
         models: root.speech-models;
+        model-details: root.speech-model-details;
         voices: root.speech-voices;
         voice-details: root.speech-voice-details;
+        samples: root.speech-samples;
+        sample-waves: root.speech-sample-waves;
+        sample-details: root.speech-sample-details;
 
         closed => { root.speech-closed(); }
         text-edited(text) => { root.speech-text-edited(text); }
         voice-changed(index) => { root.speech-voice-changed(index); }
         model-changed(index) => { root.speech-model-changed(index); }
-        pace-changed(index) => { root.speech-pace-changed(index); }
+        speed-changed(value) => { root.speech-speed-changed(value); }
+        quality-changed(index) => { root.speech-quality-changed(index); }
+        pauses-changed(value) => { root.speech-pauses-changed(value); }
+        reference-start-changed(seconds) => { root.speech-reference-start-changed(seconds); }
+        use-sample-changed(on) => { root.speech-use-sample-changed(on); }
+        sample-changed(index) => { root.speech-sample-changed(index); }
+        insert-tag(text, tag, at) => { return root.speech-insert-tag(text, tag, at); }
         begin => { root.speech-begin(); }
         cancel => { root.speech-cancel(); }
     }

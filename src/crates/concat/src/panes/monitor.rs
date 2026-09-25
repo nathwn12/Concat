@@ -22,7 +22,7 @@ use std::sync::Arc;
 use concat_host::preview::FrameSpec;
 use concat_project::model::Project;
 
-use crate::host::{spawn, spawn_detached};
+use crate::host::{spawn_detached, spawn_in_project};
 use crate::i18n::tf;
 use crate::panes::Msg;
 use crate::studio::Studio;
@@ -164,7 +164,8 @@ impl MonitorPane {
         (side(width), side(height))
     }
 
-    /// Asks the engine for the frame at the playhead, one at a time.
+    /// Asks the engine for the frame at the playhead - or under the pointer,
+    /// while the preview axis has it - one at a time.
     fn request(&mut self, studio: &mut Studio) {
         if studio.on_start || studio.session.is_none() {
             return;
@@ -179,7 +180,7 @@ impl MonitorPane {
             return;
         };
         let spec = FrameSpec {
-            time: f64::from(studio.playhead),
+            time: f64::from(studio.preview_time()),
             width,
             height,
             moving: studio.playing,
@@ -187,7 +188,7 @@ impl MonitorPane {
         let monitor = studio.host.monitor.clone();
         self.busy = true;
         self.wanted = false;
-        spawn(
+        spawn_in_project(
             move || {
                 // On the window's device the frame stays a texture; without
                 // one it comes back as pixels and is uploaded here.

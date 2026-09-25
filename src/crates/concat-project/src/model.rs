@@ -31,6 +31,19 @@ pub enum MediaKind {
     Image,
 }
 
+/// What made a media file, when it was the editor and not the user's
+/// import. The bin shelves such a file under Generated, by origin, and
+/// keeps it out of the import shelves.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaOrigin {
+    /// Read aloud by the speech sheet.
+    Speech,
+    /// A clip's sound rendered as it played - trimmed, at its speed, with
+    /// its level, fades and effects baked in - as a file of its own.
+    Processed,
+}
+
 /// What a clip can be - wider than [`MediaKind`] because a text clip has no
 /// file behind it; it *is* its own content.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -155,16 +168,18 @@ pub struct MediaItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "wire::maybe")]
     pub color_range: Option<ColorRange>,
+    /// Where the file came from when the editor made it; see
+    /// [`MediaOrigin`]. Absent, and left out of the document, for an
+    /// import, and read as absent when it names an origin this build does
+    /// not know - the file is still a file, just one shelved with the
+    /// imports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "wire::maybe")]
+    pub origin: Option<MediaOrigin>,
     /// Fields this build does not know, kept so a document written by a
     /// newer or a different build round-trips through this one intact.
     #[serde(flatten, default, skip_serializing_if = "Map::is_empty")]
     pub extra: Map<String, Value>,
-}
-
-/// Half a second: what an animation preset lasts when its entry does not
-/// say.
-fn default_animation_duration() -> f64 {
-    0.5
 }
 
 fn unity() -> f64 {
@@ -580,49 +595,6 @@ impl Crop {
     }
 }
 
-/// Which end of a clip an animation belongs to, or the whole of it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AnimationSlot {
-    /// The first seconds.
-    In,
-    /// The last seconds.
-    Out,
-    /// The whole clip.
-    Combo,
-    /// A repeating motion over the clip.
-    Loop,
-}
-
-/// A named animation on one slot. The keys are made from the name for the
-/// clip's current length whenever they are needed; see the `animation`
-/// module.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClipAnimation {
-    /// The shape's name, e.g. "Fade".
-    pub preset: String,
-    /// Seconds the shape takes, for In and Out; ignored by a Combo.
-    #[serde(default = "default_animation_duration")]
-    pub duration: f64,
-}
-
-impl ClipAnimation {
-    /// The entry, or nothing for one naming no preset.
-    pub fn tidy(mut self) -> Option<ClipAnimation> {
-        self.preset = self.preset.trim().to_owned();
-        if self.preset.is_empty() {
-            return None;
-        }
-        self.duration = if self.duration.is_finite() {
-            self.duration.max(0.0)
-        } else {
-            default_animation_duration()
-        };
-        Some(self)
-    }
-}
-
 /// Which property a user-set key belongs to.
 ///
 /// Five of the six are the picture's; the sixth is the mix's. They are one
@@ -895,8 +867,23 @@ pub struct TextStyle {
     pub stroke_color: String,
     /// A drop shadow for legibility over footage. On by default.
     pub shadow: bool,
-    /// A solid plate behind the text. Empty string for none.
+    /// A solid background behind the text, `#rrggbb[aa]`; its alpha is the
+    /// background's opacity. Empty string for none. The painter and older
+    /// comments call it the plate.
     pub background: String,
+    /// The background's corner radius as a fraction of frame height, so a
+    /// title composed against 1080p keeps its corners at 4K. The default is
+    /// the rounding every background wore before it had a dial - 15 % of
+    /// the default size's em - and zero is square.
+    pub background_radius: f64,
+    /// The air between the words and the background's left and right
+    /// edges, as a fraction of frame height, on an axis the words size
+    /// themselves: a box with a width is exactly that wide. The default
+    /// is the air every background had before it was a dial, 35 % of the
+    /// default size's em.
+    pub background_padding_x: f64,
+    /// The same above and below; 20 % of the default em by default.
+    pub background_padding_y: f64,
     /// Baseline spacing as a multiple of the font size; the reader floors it
     /// at 0.5 so lines cannot collapse onto each other.
     pub line_height: f64,
@@ -935,6 +922,11 @@ impl TextStyle {
         self.tracking = finite(self.tracking, base.tracking);
         self.max_width = finite(self.max_width, base.max_width).max(0.0);
         self.max_height = finite(self.max_height, base.max_height).max(0.0);
+        self.background_radius = finite(self.background_radius, base.background_radius).max(0.0);
+        self.background_padding_x =
+            finite(self.background_padding_x, base.background_padding_x).max(0.0);
+        self.background_padding_y =
+            finite(self.background_padding_y, base.background_padding_y).max(0.0);
         self
     }
 }
@@ -954,6 +946,9 @@ impl Default for TextStyle {
             stroke_color: "#000000".to_owned(),
             shadow: true,
             background: String::new(),
+            background_radius: 0.0135,
+            background_padding_x: 0.0315,
+            background_padding_y: 0.018,
             line_height: 1.2,
             tracking: 0.0,
             max_width: 0.0,
@@ -1150,32 +1145,10 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "wire::maybe_list")]
     pub speed_curve: Option<Vec<SpeedPoint>>,
-    /// Played backwards.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub reverse: bool,
-    /// How the clip comes in: a named shape over its first seconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(deserialize_with = "wire::maybe")]
-    pub animation_in: Option<ClipAnimation>,
-    /// How it goes out: a named shape over its last seconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(deserialize_with = "wire::maybe")]
-    pub animation_out: Option<ClipAnimation>,
-    /// A shape over its whole length.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(deserialize_with = "wire::maybe")]
-    pub animation_combo: Option<ClipAnimation>,
-    /// A repeating motion over the clip.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(deserialize_with = "wire::maybe")]
-    pub animation_loop: Option<ClipAnimation>,
     /// The user's own keys, sorted by property and then by `at`. Empty is a
-    /// clip whose properties are the constants above.
-    ///
-    /// These sit *under* the animation presets rather than beside them: a
-    /// keyed property's value replaces the constant the preset is relative
-    /// to, so a clip can carry both a hand-keyed scale and a Fade preset
-    /// without either having to know about the other.
+    /// clip whose properties are the constants above. A keyed property's
+    /// keys travel absolutely: they replace the constant rather than ride
+    /// on it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[serde(deserialize_with = "wire::list")]
     pub keys: Vec<ClipKey>,
@@ -1311,11 +1284,6 @@ impl Clip {
             speed: 1.0,
             preserve_pitch: true,
             speed_curve: None,
-            reverse: false,
-            animation_in: None,
-            animation_out: None,
-            animation_combo: None,
-            animation_loop: None,
             keys: Vec::new(),
             flip_h: false,
             flip_v: false,
@@ -1380,19 +1348,25 @@ impl Clip {
         }
         self.keys
             .retain(|key| (0.0..=1.0).contains(&key.at) && key.value.is_finite());
+        // A key holds what the field itself may hold. Rotation is the one
+        // exception: a key past a full turn is a spin, and wrapping it
+        // would take the spin away.
+        for key in &mut self.keys {
+            key.value = match key.property {
+                KeyProperty::Scale => key.value.clamp(MIN_SCALE, MAX_SCALE),
+                KeyProperty::Opacity => key.value.clamp(0.0, 1.0),
+                KeyProperty::Volume => key.value.max(0.0),
+                KeyProperty::OffsetX | KeyProperty::OffsetY => {
+                    key.value.clamp(-MAX_OFFSET, MAX_OFFSET)
+                }
+                KeyProperty::Rotation => key.value,
+            };
+        }
         self.sort_keys();
         for chain in [&mut self.filters, &mut self.video_effects] {
             for entry in chain.iter_mut() {
                 entry.sort_keys();
             }
-        }
-        for slot in [
-            &mut self.animation_in,
-            &mut self.animation_out,
-            &mut self.animation_combo,
-            &mut self.animation_loop,
-        ] {
-            *slot = slot.take().and_then(ClipAnimation::tidy);
         }
         self.text = self.text.take().map(TextStyle::tidy);
         if self.muted == Some(false) {
@@ -1940,10 +1914,18 @@ impl Timeline {
         Arc::make_mut(&mut self.clips[index])
     }
 
-    /// Every clip, mutable, each copied out of any snapshot sharing it as
-    /// it is reached.
-    pub fn clips_mut(&mut self) -> impl Iterator<Item = &mut Clip> {
-        self.clips.iter_mut().map(Arc::make_mut)
+    /// The clips `keep` picks, mutable, each copied out of any snapshot
+    /// sharing it only once picked: a ripple that moves ten clips of five
+    /// thousand copies ten, and the undo step stays the size of the edit
+    /// (audit 2026-09-23, #8).
+    pub fn clips_where(
+        &mut self,
+        mut keep: impl FnMut(&Clip) -> bool,
+    ) -> impl Iterator<Item = &mut Clip> {
+        self.clips
+            .iter_mut()
+            .filter(move |clip| keep(clip))
+            .map(Arc::make_mut)
     }
 
     /// The track with this id, or None if it was removed.

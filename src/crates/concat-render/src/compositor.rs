@@ -37,9 +37,10 @@ pub trait Compositor {
 
     /// Combines two finished frames with a transition: the outgoing picture
     /// `from` and the incoming one `to`, at the pass's `progress`. The shader
-    /// owns the blend. `None` from a compositor that cannot run shaders, which
-    /// the CPU reference cannot: the caller then shows the fallback dissolve
-    /// the incoming layer already carries.
+    /// owns the blend where a compositor can run one; the CPU reference
+    /// draws the shape the pass names as its `xfade` instead. `None` from a
+    /// compositor that can do neither: the caller then shows the fallback
+    /// dissolve the incoming layer already carries.
     fn combine(
         &mut self,
         _width: u32,
@@ -58,6 +59,22 @@ pub trait Compositor {
 pub struct CpuCompositor;
 
 impl Compositor for CpuCompositor {
+    /// The shape the pass names, drawn in plain arithmetic; see
+    /// `transitions`. A pass naming no shape, or one the CPU does not
+    /// draw, is declined.
+    fn combine(
+        &mut self,
+        _width: u32,
+        _height: u32,
+        _time: f32,
+        from: &Frame,
+        to: &Frame,
+        pass: &TransitionPass,
+    ) -> Option<Frame> {
+        let xfade = pass.xfade.as_deref()?;
+        crate::transitions::combine(from, to, xfade, pass.progress)
+    }
+
     fn render(&mut self, plan: &FramePlan) -> Frame {
         let mut ground = Frame::black(plan.width, plan.height);
         let mut treatments: Vec<&PlannedTreatment> = plan.treatments.iter().collect();
@@ -218,9 +235,8 @@ impl Weighing<'_> {
         }
         for channel in 0..3 {
             let colour = self.shading.colour(channel, sample[channel] / 255.0) * 255.0;
-            let over = colour * alpha;
             let ground = f32::from(under[channel]);
-            under[channel] = mix(self.blend, over, ground, alpha)
+            under[channel] = mix(self.blend, colour, ground, alpha)
                 .round()
                 .clamp(0.0, 255.0) as u8;
         }
@@ -228,18 +244,25 @@ impl Weighing<'_> {
     }
 }
 
-/// One channel of `blend`: `over` is the layer's colour already times its
-/// alpha, `under` the ground, both in `0..=255`. The formulas are the GPU's
-/// fixed-function ones over premultiplied colour, so the two paths agree.
+/// One channel of `blend`: `colour` is the layer's straight colour, `under`
+/// the ground, both in `0..=255`, `alpha` how much of the layer is there.
+/// Normal, Multiply, Screen and Add are the GPU's fixed-function blends
+/// over premultiplied colour, spelled the same way so the two paths agree.
+/// Lighten and Darken weigh the lighter (darker) of the two in by the
+/// layer's alpha - a white layer at 30 % over mid grey lightens it 30 % of
+/// the way to white, and darkens it not at all - which no fixed-function
+/// blend expresses; the GPU samples a copy of the ground for these two
+/// (audit 2026-09-23, #10).
 #[inline]
-fn mix(blend: Blend, over: f32, under: f32, alpha: f32) -> f32 {
+fn mix(blend: Blend, colour: f32, under: f32, alpha: f32) -> f32 {
+    let over = colour * alpha;
     match blend {
         Blend::Normal => over + under * (1.0 - alpha),
         Blend::Multiply => over * under / 255.0 + under * (1.0 - alpha),
         Blend::Screen => over * (1.0 - under / 255.0) + under,
         Blend::Add => over + under,
-        Blend::Lighten => over.max(under),
-        Blend::Darken => over.min(under),
+        Blend::Lighten => colour.max(under) * alpha + under * (1.0 - alpha),
+        Blend::Darken => colour.min(under) * alpha + under * (1.0 - alpha),
     }
 }
 
@@ -392,6 +415,20 @@ fn blend_aligned(output: &mut Frame, picture: &Frame, geometry: &Geometry, weigh
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lighten_and_darken_weigh_the_layer_in_by_its_alpha() {
+        use super::{Blend, mix};
+        // White at 30 % over mid grey: 30 % of the way to white, no darker.
+        assert!((mix(Blend::Lighten, 255.0, 128.0, 0.3) - 166.1).abs() < 0.01);
+        assert_eq!(mix(Blend::Darken, 255.0, 128.0, 0.3), 128.0);
+        // Black at 30 % over mid grey: 30 % of the way to black, no lighter.
+        assert!((mix(Blend::Darken, 0.0, 128.0, 0.3) - 89.6).abs() < 0.01);
+        assert_eq!(mix(Blend::Lighten, 0.0, 128.0, 0.3), 128.0);
+        // At full alpha the pair are the plain max and min.
+        assert_eq!(mix(Blend::Lighten, 40.0, 128.0, 1.0), 128.0);
+        assert_eq!(mix(Blend::Darken, 40.0, 128.0, 1.0), 40.0);
+    }
+
     use std::sync::Arc;
 
     use concat_core::time::FrameRate;
@@ -715,6 +752,36 @@ mod tests {
         let out = CpuCompositor.render(&frame_plan);
         assert_eq!(out.pixel(7, 7), Some([255, 0, 0, 255]));
         assert_eq!(out.pixel(0, 0), Some([0, 0, 255, 255]));
+    }
+
+    /// Through the trait: a pass naming a shape the CPU draws is combined,
+    /// one naming none is declined, and the shader source is never read.
+    #[test]
+    fn the_cpu_combines_by_the_named_shape_and_declines_without_one() {
+        let from = solid(8, 8, [255, 0, 0, 255]);
+        let to = solid(8, 8, [0, 0, 255, 255]);
+        let pass = |xfade: Option<&str>| TransitionPass {
+            key: "test.cut@1".to_owned(),
+            source: Arc::from("not wgsl at all"),
+            params: vec![0; 16],
+            progress: 1.0,
+            lut: None,
+            xfade: xfade.map(str::to_owned),
+        };
+        let done = CpuCompositor
+            .combine(8, 8, 0.0, &from, &to, &pass(Some("wipeleft")))
+            .expect("a shape the CPU draws");
+        assert_eq!(done.pixel(0, 0), Some([0, 0, 255, 255]));
+        assert!(
+            CpuCompositor
+                .combine(8, 8, 0.0, &from, &to, &pass(None))
+                .is_none()
+        );
+        assert!(
+            CpuCompositor
+                .combine(8, 8, 0.0, &from, &to, &pass(Some("hlslice")))
+                .is_none()
+        );
     }
 
     #[test]

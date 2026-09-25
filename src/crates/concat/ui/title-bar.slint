@@ -111,11 +111,16 @@ export component TitleBar inherits Rectangle {
     /// Leaves room for the traffic lights and drops nothing else; on other
     /// platforms the strip starts at the left edge.
     in property <bool> macos: true;
-    /// The launch screen's face: the wordmark and the theme toggle, and
-    /// nothing else. The menus act on a project, the panel picker and Export
-    /// act on an edit, and on this screen there is neither — a strip of
-    /// controls that all refuse is worse than a strip without them.
+    /// The launch screen's face: the theme toggle and the window buttons,
+    /// and nothing else. The menus act on a project, the panel picker and
+    /// Export act on an edit, and on this screen there is neither — a strip
+    /// of controls that all refuse is worse than a strip without them.
     in property <bool> minimal;
+    /// The launch screen is under the strip, which has a ground of its own —
+    /// a deeper one than the editor's. The strip takes that ground rather
+    /// than its usual panel, so the launcher reads as one room and not as a
+    /// dark window with a light lid. See the `launch-` ladder in theme/.
+    in property <bool> deep;
 
     /// Draw the window buttons at the right: true wherever the platform's
     /// decorations were taken off, which is everywhere but macOS.
@@ -139,7 +144,13 @@ export component TitleBar inherits Rectangle {
     callback export-clicked();
 
     height: 32px;
-    background: Theme.panel;
+    // The window's ground, not a panel's: the strip is the frame the panes
+    // float in, and it reads as one with the gutters between them.
+    background: root.deep ? Theme.launch-page : Theme.page;
+
+    property <bool> drag-armed: false;
+    property <length> press-x: 0px;
+    property <length> press-y: 0px;
 
     // Whatever is not a control drags the window. Declared first so every
     // control sits above it and takes its own presses; Texts and plain
@@ -148,20 +159,27 @@ export component TitleBar inherits Rectangle {
         pointer-event(event) => {
             if (event.kind == PointerEventKind.down
                 && event.button == PointerEventButton.left) {
-                root.begin-drag();
+                root.drag-armed = true;
+                root.press-x = self.mouse-x;
+                root.press-y = self.mouse-y;
+            } else if (event.kind == PointerEventKind.up
+                || event.kind == PointerEventKind.cancel) {
+                root.drag-armed = false;
+            }
+        }
+        moved => {
+            if (root.drag-armed && self.pressed) {
+                if (Math.abs(self.mouse-x - root.press-x) > 4px
+                    || Math.abs(self.mouse-y - root.press-y) > 4px) {
+                    root.drag-armed = false;
+                    root.begin-drag();
+                }
             }
         }
         double-clicked => {
+            root.drag-armed = false;
             root.toggle-maximize();
         }
-    }
-
-    Rectangle {
-        x: 0;
-        y: parent.height - 1px;
-        width: parent.width;
-        height: 1px;
-        background: Theme.line;
     }
 
     HorizontalLayout {
@@ -175,27 +193,9 @@ export component TitleBar inherits Rectangle {
         padding-right: root.own-buttons ? 0px : 8px;
         spacing: 2px;
 
-        // mark + wordmark
-        VerticalLayout {
-            alignment: center;
-            Image {
-                width: 16px;
-                height: 16px;
-                source: @image-url("assets/concat-logo.png");
-            }
-        }
-
-        VerticalLayout {
-            alignment: center;
-            padding-left: 6px;
-            padding-right: 6px;
-            Text {
-                text: "Concat";
-                color: Theme.fg;
-                font-size: Theme.fs-lg;
-                font-weight: Theme.weight-display;
-            }
-        }
+        // No mark and no wordmark: the strip opens on the menus. A window
+        // does not need to say whose it is on every frame, and the launch
+        // screen's heading already carries the name where it means something.
 
         // Each label reports its own position rather than a fixed one: they
         // are sized from their text, so where "View" starts depends on how

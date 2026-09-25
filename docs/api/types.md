@@ -156,8 +156,6 @@ the JSON when they hold it.
 | `opacity` | number | 0..1 |
 | `speed` | number | Playback rate; the curve's mean when a curve is set |
 | `speedCurve` | *SpeedPoint*[] | *optional* |
-| `reverse` | bool | *optional* |
-| `animationIn`, `animationOut`, `animationCombo`, `animationLoop` | `{preset, duration}` | *optional* |
 | `keys` | *ClipKey*[] | *optional*. User keyframes, sorted by property then `at` |
 | `flipH`, `flipV` | bool | *optional* |
 | `blend` | string | *optional*. `multiply`, `screen`, `add`, `lighten`, `darken`; absent is normal |
@@ -198,6 +196,7 @@ meaningfully even when the file is missing.
 | `audioTracks` | *AudioTrack*[] | *optional*. Every audio stream, in file order |
 | `placeholder` | bool | *optional*. True for a template slot |
 | `colorRange` | string | *optional*. `limited` or `full`: the levels the picture is read as, over the file's own tag. Absent means "as tagged". Set with `setMediaColorRange` |
+| `origin` | string | *optional*. `speech` for a file the speech sheet read aloud. Absent for an import. The bin shelves a file with an origin under Generated, not with the imports |
 
 ### AudioTrack
 
@@ -255,7 +254,10 @@ change; the rest take these defaults.
 | `strokeWidth` | number | 0 | Outline as a fraction of frame height; 0 is none |
 | `strokeColor` | string | `"#000000"` | |
 | `shadow` | bool | true | A drop shadow |
-| `background` | string | `""` | A plate colour behind the text; empty is none |
+| `background` | string | `""` | A background colour behind the text, `#rrggbb[aa]`, its alpha the opacity; empty is none |
+| `backgroundRadius` | number | 0.0135 | The background's corner radius as a fraction of frame height; 0 is square |
+| `backgroundPaddingX` | number | 0.0315 | The background's air either side of the words, as a fraction of frame height; ignored on an axis `maxWidth` sizes |
+| `backgroundPaddingY` | number | 0.018 | The same above and below; ignored when `maxHeight` sizes the box |
 | `lineHeight` | number | 1.2 | Multiple of the font size; floored at 0.5 |
 | `tracking` | number | 0 | Extra letter spacing, in frame-height fractions |
 | `maxWidth` | number | 0 | Wrap width as a fraction of frame width; 0 is no wrap |
@@ -304,7 +306,7 @@ A probed file, as `addMedia`, `fillSlot`, `replaceClipMedia` and
 `freezeFrame` take it. The same fields as *MediaItem* minus `id` and
 `placeholder`: `path`, `name`, `duration`, `kind`, `width`, `height`,
 `frameRate`, `frameRateFraction`, `videoCodec`, `audioCodec`, `hasAudio`,
-`audioTracks`.
+`audioTracks`, and `origin` (*optional*; leave it out for an import).
 
 > [!TIP]
 > Build one from a `media.probe` reply: copy `path`, `duration`, `kind`

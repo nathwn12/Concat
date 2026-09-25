@@ -21,7 +21,6 @@
 //! document model needs serde, and concat-core's zero-dependency rule is worth
 //! more than the adjacency.
 
-pub mod animation;
 pub mod commands;
 pub mod doc;
 pub mod editor;
@@ -40,7 +39,9 @@ mod tests {
     use crate::commands::{ClipMove, ClipPatch, Command, NewMedia, TrackFlag, TrimEdge};
     use crate::doc::DocumentSettings;
     use crate::editor::Editor;
-    use crate::model::{AudioTrack, ClipKind, MediaItem, MediaKind, Project, TextStyle};
+    use crate::model::{
+        AudioTrack, ClipKind, MediaItem, MediaKind, MediaOrigin, Project, TextStyle,
+    };
 
     fn media(path: &str, duration: f64, has_audio: bool) -> Command {
         Command::AddMedia {
@@ -57,6 +58,7 @@ mod tests {
                 audio_codec: has_audio.then(|| "aac".to_owned()),
                 has_audio,
                 audio_tracks: Vec::new(),
+                origin: None,
             },
         }
     }
@@ -618,6 +620,47 @@ mod tests {
     }
 
     #[test]
+    fn replace_clip_media_can_move_the_in_point_to_the_copy() {
+        let (mut editor, _, clip_id) = fixture();
+        editor
+            .apply(Command::TrimClip {
+                clip_id: clip_id.clone(),
+                edge: TrimEdge::Start,
+                delta: 2.0,
+                ripple: false,
+            })
+            .expect("trims");
+        let trimmed = editor.project().active().clip(&clip_id).expect("clip");
+        assert_eq!((trimmed.source_start, trimmed.duration), (2.0, 8.0));
+        let copy = NewMedia {
+            path: "/project/cache/reverse-1-2000-8000.mp4".into(),
+            name: "a.mp4 (reversed)".into(),
+            duration: Some(8.0),
+            kind: MediaKind::Video,
+            width: Some(1920),
+            height: Some(1080),
+            frame_rate: Some(30.0),
+            frame_rate_fraction: Some("30/1".into()),
+            video_codec: Some("h264".into()),
+            audio_codec: None,
+            has_audio: false,
+            audio_tracks: Vec::new(),
+            origin: None,
+        };
+        let outcome = editor
+            .apply(Command::ReplaceClipMedia {
+                clip_id: clip_id.clone(),
+                item: copy,
+                source_start: Some(0.0),
+            })
+            .expect("replaces");
+        assert!(outcome.applied);
+        let clip = editor.project().active().clip(&clip_id).expect("clip");
+        assert_eq!(clip.source_start, 0.0, "the copy starts at its own zero");
+        assert_eq!(clip.duration, 8.0, "the length is kept");
+    }
+
+    #[test]
     fn replace_clip_media_points_the_clip_at_the_copy_and_keeps_the_original() {
         let (mut editor, media_id, clip_id) = fixture();
         let copy = NewMedia {
@@ -633,11 +676,13 @@ mod tests {
             audio_codec: Some("aac".into()),
             has_audio: true,
             audio_tracks: Vec::new(),
+            origin: None,
         };
         let outcome = editor
             .apply(Command::ReplaceClipMedia {
                 clip_id: clip_id.clone(),
                 item: copy.clone(),
+                source_start: None,
             })
             .expect("replaces");
         assert!(outcome.applied);
@@ -661,6 +706,7 @@ mod tests {
             .apply(Command::ReplaceClipMedia {
                 clip_id: clip_id.clone(),
                 item: copy.clone(),
+                source_start: None,
             })
             .expect("no-op");
         assert!(!again.applied);
@@ -674,6 +720,7 @@ mod tests {
                     path: "/elsewhere.mp4".into(),
                     ..copy
                 },
+                source_start: None,
             })
             .expect("no-op");
         assert!(!nobody.applied);
@@ -696,6 +743,7 @@ mod tests {
                 audio_codec: None,
                 has_audio: false,
                 audio_tracks: Vec::new(),
+                origin: None,
             }
         };
         assert!(
@@ -703,6 +751,7 @@ mod tests {
                 .apply(Command::ReplaceClipMedia {
                     clip_id: clip_id.clone(),
                     item: bad,
+                    source_start: None,
                 })
                 .is_err()
         );
@@ -737,6 +786,7 @@ mod tests {
             audio_codec: None,
             has_audio: false,
             audio_tracks: Vec::new(),
+            origin: None,
         };
         let freeze_id = editor
             .apply(Command::FreezeFrame {
@@ -774,17 +824,16 @@ mod tests {
         );
     }
 
-    /// A freeze cuts the clip the way a split does, so a reversed or curved
-    /// clip has to come out of it the way a split leaves one: a curve goes
-    /// to its constant mean, a reverse is kept, and the pieces meet at the
-    /// frozen source time either way.
+    /// A freeze cuts the clip the way a split does, so a curved clip has to
+    /// come out of it the way a split leaves one: both pieces at the curve's
+    /// constant mean, meeting at the frozen source time.
     #[test]
-    fn freeze_frame_on_a_reversed_or_curved_clip_keeps_the_pieces_continuous() {
-        for (reverse, curve) in [
-            (true, None),
-            (
-                false,
-                Some(vec![
+    fn freeze_frame_on_a_curved_clip_keeps_the_pieces_continuous() {
+        let (mut editor, _, clip_id) = fixture();
+        editor
+            .apply(Command::SetClipSpeedCurve {
+                clip_id: clip_id.clone(),
+                curve: Some(vec![
                     crate::model::SpeedPoint {
                         at: 0.0,
                         speed: 0.5,
@@ -794,79 +843,51 @@ mod tests {
                         speed: 2.0,
                     },
                 ]),
-            ),
-        ] {
-            let (mut editor, _, clip_id) = fixture();
-            editor
-                .apply(Command::UpdateClip {
-                    clip_id: clip_id.clone(),
-                    patch: ClipPatch {
-                        reverse: Some(reverse),
-                        ..Default::default()
-                    },
-                })
-                .expect("reverses");
-            editor
-                .apply(Command::SetClipSpeedCurve {
-                    clip_id: clip_id.clone(),
-                    curve: curve.clone(),
-                })
-                .expect("curves");
-            let freeze_id = editor
-                .apply(Command::FreezeFrame {
-                    clip_id: clip_id.clone(),
-                    time: 4.0,
-                    duration: Some(1.0),
-                    still: Some(NewMedia {
-                        path: "/freeze.jpg".into(),
-                        name: "freeze.jpg".into(),
-                        duration: None,
-                        kind: MediaKind::Image,
-                        width: Some(1920),
-                        height: Some(1080),
-                        frame_rate: None,
-                        frame_rate_fraction: None,
-                        video_codec: None,
-                        audio_codec: None,
-                        has_audio: false,
-                        audio_tracks: Vec::new(),
-                    }),
-                })
-                .expect("freezes")
-                .created_id
-                .expect("freeze id");
+            })
+            .expect("curves");
+        let freeze_id = editor
+            .apply(Command::FreezeFrame {
+                clip_id: clip_id.clone(),
+                time: 4.0,
+                duration: Some(1.0),
+                still: Some(NewMedia {
+                    path: "/freeze.jpg".into(),
+                    name: "freeze.jpg".into(),
+                    duration: None,
+                    kind: MediaKind::Image,
+                    width: Some(1920),
+                    height: Some(1080),
+                    frame_rate: None,
+                    frame_rate_fraction: None,
+                    video_codec: None,
+                    audio_codec: None,
+                    has_audio: false,
+                    audio_tracks: Vec::new(),
+                    origin: None,
+                }),
+            })
+            .expect("freezes")
+            .created_id
+            .expect("freeze id");
 
-            let timeline = editor.project().active();
-            let head = timeline.clip(&clip_id).expect("head");
-            let tail = timeline
-                .clips
-                .iter()
-                .find(|clip| clip.id != clip_id && clip.id != freeze_id)
-                .expect("tail");
-            for piece in [head, tail] {
-                assert!(
-                    piece.speed_curve.is_none(),
-                    "reverse {reverse}, curve {curve:?}: a piece kept a curve its in-point was not computed for"
-                );
-                assert_eq!(piece.reverse, reverse, "a cut keeps the direction");
-            }
-            if reverse {
-                // Backwards, the tail shows the early source and the head
-                // picks up where the tail's span ends.
-                assert_eq!(
-                    tail.source_start + tail.duration * tail.speed,
-                    head.source_start,
-                    "the head shows what comes after the tail's span"
-                );
-                assert_eq!(tail.source_start, 0.0, "the tail keeps the in-point");
-            } else {
-                assert_eq!(
-                    head.source_start + head.duration * head.speed,
-                    tail.source_start,
-                    "curve {curve:?}: the tail picks up where the head ends"
-                );
-            }
+        let timeline = editor.project().active();
+        let head = timeline.clip(&clip_id).expect("head");
+        let tail = timeline
+            .clips
+            .iter()
+            .find(|clip| clip.id != clip_id && clip.id != freeze_id)
+            .expect("tail");
+        for piece in [head, tail] {
+            assert!(
+                piece.speed_curve.is_none(),
+                "a piece kept a curve its in-point was not computed for"
+            );
         }
+        assert_eq!(
+            head.source_start + head.duration * head.speed,
+            tail.source_start,
+            "the tail picks up where the head ends"
+        );
     }
 
     #[test]
@@ -893,76 +914,6 @@ mod tests {
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].duration, 10.0);
         assert_eq!(clips[0].id, clip_id, "the first piece keeps its identity");
-    }
-
-    #[test]
-    fn a_reversed_clip_splits_into_mirrored_halves_and_merges_back() {
-        let (mut editor, _, clip_id) = fixture();
-        editor
-            .apply(Command::UpdateClip {
-                clip_id: clip_id.clone(),
-                patch: ClipPatch {
-                    reverse: Some(true),
-                    ..Default::default()
-                },
-            })
-            .expect("reverses");
-        editor
-            .apply(Command::SplitClips {
-                clip_ids: vec![clip_id.clone()],
-                time: 4.0,
-            })
-            .expect("splits");
-        let clips = &editor.project().active().clips;
-        assert_eq!(clips.len(), 2);
-        let (head, tail) = (&clips[0], &clips[1]);
-        assert!(
-            head.reverse && tail.reverse,
-            "both halves still play backwards"
-        );
-        // The whole showed source 10→0. The head's four seconds show 10→6,
-        // so its span is [6, 10); the tail's six show 6→0, span [0, 6).
-        assert_eq!(head.duration, 4.0);
-        assert_eq!(head.source_start, 6.0);
-        assert_eq!(tail.duration, 6.0);
-        assert_eq!(tail.source_start, 0.0);
-
-        let ids: Vec<String> = clips.iter().map(|clip| clip.id.clone()).collect();
-        editor
-            .apply(Command::MergeClips { clip_ids: ids })
-            .expect("merges");
-        let clip = &editor.project().active().clips[0];
-        assert_eq!((clip.duration, clip.source_start), (10.0, 0.0));
-        assert!(clip.reverse);
-    }
-
-    #[test]
-    fn a_head_trim_on_a_reversed_clip_keeps_the_in_point() {
-        let (mut editor, _, clip_id) = fixture();
-        editor
-            .apply(Command::UpdateClip {
-                clip_id: clip_id.clone(),
-                patch: ClipPatch {
-                    reverse: Some(true),
-                    ..Default::default()
-                },
-            })
-            .expect("reverses");
-        editor
-            .apply(Command::TrimClip {
-                clip_id: clip_id.clone(),
-                edge: TrimEdge::Start,
-                delta: 3.0,
-                ripple: false,
-            })
-            .expect("trims");
-        let clip = &editor.project().active().clips[0];
-        // The head showed source 10; three seconds in it shows 7, and that
-        // is what the trimmed clip now opens on: span [0, 7), in-point 0.
-        assert_eq!(
-            (clip.start, clip.duration, clip.source_start),
-            (3.0, 7.0, 0.0)
-        );
     }
 
     #[test]
@@ -1255,6 +1206,71 @@ mod tests {
         );
     }
 
+    /// A ripple delete moves the clips behind the gap and copies those
+    /// alone: the clip in front is still the snapshot's.
+    #[test]
+    fn a_ripple_copies_only_the_clips_it_moves() {
+        let (mut editor, _, clip_id) = fixture();
+        editor
+            .apply(Command::SplitClips {
+                clip_ids: vec![clip_id.clone()],
+                time: 4.0,
+            })
+            .expect("splits");
+        editor
+            .apply(Command::SplitClips {
+                clip_ids: vec![editor.project().active().clips[1].id.clone()],
+                time: 7.0,
+            })
+            .expect("splits again");
+        let head = std::sync::Arc::clone(&editor.project().active().clips[0]);
+        let middle = editor.project().active().clips[1].id.clone();
+        let last = std::sync::Arc::clone(&editor.project().active().clips[2]);
+        editor
+            .apply(Command::RemoveClips {
+                clip_ids: vec![middle],
+                ripple: true,
+            })
+            .expect("ripple deletes");
+        let clips = &editor.project().active().clips;
+        assert_eq!(clips.len(), 2);
+        assert!(
+            std::sync::Arc::ptr_eq(&head, &clips[0]),
+            "the clip in front of the gap is still shared with the snapshot"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&last, &clips[1]),
+            "the moved clip was copied"
+        );
+        assert_eq!(clips[1].start, 4.0);
+    }
+
+    /// Every command's result goes through `Clip::tidy`: a key set past the
+    /// field's range comes out clamped, the way the field itself would.
+    #[test]
+    fn a_command_leaves_a_tidy_clip_behind() {
+        let (mut editor, _, clip_id) = fixture();
+        editor
+            .apply(Command::SetClipKey {
+                clip_id: clip_id.clone(),
+                property: crate::model::KeyProperty::OffsetX,
+                at: 0.5,
+                value: 99.0,
+                ease: Default::default(),
+            })
+            .expect("sets a key");
+        let clip = &editor.project().active().clips[0];
+        let key = clip
+            .keys_on(crate::model::KeyProperty::OffsetX)
+            .next()
+            .expect("the key");
+        assert_eq!(
+            key.value,
+            crate::model::ranges::MAX_OFFSET,
+            "clamped like the field"
+        );
+    }
+
     #[test]
     fn a_command_copies_only_what_it_writes() {
         let (mut editor, _, clip_id) = fixture();
@@ -1378,7 +1394,6 @@ mod tests {
                 { "id": "c1", "trackId": "T1", "mediaId": "m1", "kind": "video",
                   "cutout": { "mode": "unknown" }, "keys": "garbage",
                   "transitionIn": { "id": "cross-fade" },
-                  "animationIn": { "preset": "  " },
                   "videoEffects": [{ "id": "sepia", "keys": { "amount": [ { "at": 0.5, "value": 1.0 }, { "at": 7.0, "value": 2.0 } ] } }, "not an effect"] },
                 { "id": "c2", "trackId": "T1", "mediaId": "m2", "kind": "audio", "start": "soon" }
             ]
@@ -1414,7 +1429,6 @@ mod tests {
         );
         assert!(clip.keys.is_empty());
         assert_eq!(clip.transition_in.as_ref().expect("kept").duration, 1.0);
-        assert!(clip.animation_in.is_none(), "a preset with no name is none");
         assert_eq!(clip.video_effects.len(), 1);
         assert_eq!(
             clip.video_effects[0].keys["amount"].len(),
@@ -1565,21 +1579,8 @@ mod tests {
     }
 
     #[test]
-    fn a_split_leaves_the_entrance_with_the_head_and_the_exit_with_the_tail() {
-        use crate::model::{AnimationSlot, ClipAnimation};
+    fn a_split_leaves_the_fade_in_with_the_head_and_the_fade_out_with_the_tail() {
         let (mut editor, _, clip_id) = fixture();
-        for (slot, preset) in [(AnimationSlot::In, "Fade"), (AnimationSlot::Out, "Fade")] {
-            editor
-                .apply(Command::SetClipAnimation {
-                    clip_id: clip_id.clone(),
-                    slot,
-                    animation: Some(ClipAnimation {
-                        preset: preset.to_owned(),
-                        duration: 0.5,
-                    }),
-                })
-                .expect("animates");
-        }
         editor
             .apply(Command::UpdateClip {
                 clip_id: clip_id.clone(),
@@ -1598,8 +1599,6 @@ mod tests {
             .expect("splits");
         let timeline = editor.project().active();
         let (head, tail) = (&timeline.clips[0], &timeline.clips[1]);
-        assert!(head.animation_in.is_some() && head.animation_out.is_none());
-        assert!(tail.animation_in.is_none() && tail.animation_out.is_some());
         assert_eq!((head.fade_in, head.fade_out), (0.5, 0.0));
         assert_eq!((tail.fade_in, tail.fade_out), (0.0, 0.5));
 
@@ -1608,7 +1607,6 @@ mod tests {
             .apply(Command::MergeClips { clip_ids: ids })
             .expect("merges");
         let clip = &editor.project().active().clips[0];
-        assert!(clip.animation_in.is_some() && clip.animation_out.is_some());
         assert_eq!((clip.fade_in, clip.fade_out), (0.5, 0.5));
     }
 
@@ -2347,6 +2345,7 @@ mod tests {
                     audio_codec: None,
                     has_audio: false,
                     audio_tracks: Vec::new(),
+                    origin: None,
                 },
             })
             .expect("fills");
@@ -2386,6 +2385,7 @@ mod tests {
                 audio_codec: None,
                 has_audio: false,
                 audio_tracks: Vec::new(),
+                origin: None,
             },
         });
         assert!(
@@ -2478,6 +2478,57 @@ mod tests {
         });
         let editor = Editor::from_document(&legacy).expect("loads");
         assert!(!editor.project().media[0].placeholder);
+    }
+
+    #[test]
+    fn a_medias_origin_round_trips_and_an_unknown_one_reads_as_an_import() {
+        let mut editor = Editor::new();
+        let Command::AddMedia { mut item } = media("/voice.wav", 3.0, true) else {
+            unreachable!()
+        };
+        item.kind = MediaKind::Audio;
+        item.origin = Some(MediaOrigin::Speech);
+        editor.apply(Command::AddMedia { item }).expect("adds");
+        editor.apply(media("/a.mp4", 10.0, true)).expect("adds");
+
+        let document = editor.to_document(&settings());
+        let media = document["media"].as_array().expect("a list");
+        assert_eq!(media[0]["origin"], json!("speech"));
+        assert!(
+            media[1].get("origin").is_none(),
+            "an import says nothing, so a document without voices stays byte-identical"
+        );
+        let restored = Editor::from_document(&document).expect("loads");
+        assert_eq!(
+            restored.project().media[0].origin,
+            Some(MediaOrigin::Speech)
+        );
+        assert_eq!(restored.project().media[1].origin, None);
+
+        // A document from a build that predates origins, and one from a
+        // build with origins this one has not heard of: both load, and
+        // both files are imports here.
+        let legacy = json!({
+            "name": "Old", "version": 1,
+            "media": [
+                { "id": "m1", "path": "/a.mp4", "name": "a.mp4", "kind": "video",
+                  "hasAudio": false },
+                { "id": "m2", "path": "/b.wav", "name": "b.wav", "kind": "audio",
+                  "hasAudio": true, "origin": "telepathy" },
+                { "id": "m3", "path": "/c.wav", "name": "c.wav", "kind": "audio",
+                  "hasAudio": true, "origin": 7 }
+            ],
+            "tracks": [{ "id": "T1", "name": "Track 1", "visible": true, "muted": false }],
+            "clips": []
+        });
+        let editor = Editor::from_document(&legacy).expect("loads");
+        assert!(
+            editor
+                .project()
+                .media
+                .iter()
+                .all(|item| item.origin.is_none())
+        );
     }
 
     #[test]
@@ -3584,6 +3635,7 @@ mod tests {
             audio_tracks: vec![],
             placeholder: false,
             color_range: None,
+            origin: None,
             extra: Default::default(),
         });
 
@@ -3621,6 +3673,7 @@ mod tests {
             audio_tracks: vec![],
             placeholder: false,
             color_range: None,
+            origin: None,
             extra: Default::default(),
         });
 

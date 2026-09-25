@@ -13,9 +13,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    AnimationSlot, AppliedFilter, AudioTrack, Clip, ClipAnimation, ClipKind, ColorRange, Crop,
-    CustomFont, Cutout, CutoutMode, KeyEase, KeyProperty, MediaItem, MediaKind, Project,
-    SpeedPoint, Stroke, TextStyle, Timeline, Track, Transition, VideoSettings,
+    AppliedFilter, AudioTrack, Clip, ClipKind, ColorRange, Crop, CustomFont, Cutout, CutoutMode,
+    KeyEase, KeyProperty, MediaItem, MediaKind, MediaOrigin, Project, SpeedPoint, Stroke,
+    TextStyle, Timeline, Track, Transition, VideoSettings,
 };
 
 mod audio;
@@ -34,7 +34,7 @@ const DEFAULT_IMAGE_DURATION: f64 = 5.0;
 const DEFAULT_TEXT_DURATION: f64 = 4.0;
 /// How long a layer covers when first placed. Editorial default, not a fact.
 const DEFAULT_LAYER_DURATION: f64 = 5.0;
-/// Default hold for a CapCut-style freeze when the caller omits duration.
+/// Default hold for a freeze frame when the caller omits duration.
 const DEFAULT_FREEZE_DURATION: f64 = 1.0;
 pub(crate) use crate::model::ranges::{
     MAX_OFFSET, MAX_SCALE, MAX_SPEED, MAX_STRETCH, MIN_CLIP_DURATION, MIN_SCALE, MIN_SPEED,
@@ -103,9 +103,6 @@ pub struct ClipPatch {
     /// deleted gets its voice back.
     #[serde(default)]
     pub muted: Option<bool>,
-    /// Play backwards.
-    #[serde(default)]
-    pub reverse: Option<bool>,
     /// Mirror left to right.
     #[serde(default)]
     pub flip_h: Option<bool>,
@@ -208,6 +205,11 @@ pub struct NewMedia {
     /// Defaulted so a caller from before the list can still add media.
     #[serde(default)]
     pub audio_tracks: Vec<AudioTrack>,
+    /// What made the file, when the editor did; see `MediaItem::origin`.
+    /// Defaulted so an import, and a caller from before origins, says
+    /// nothing.
+    #[serde(default)]
+    pub origin: Option<MediaOrigin>,
 }
 
 /// Every edit, as the window sends it: a tagged `op` plus camelCase
@@ -294,10 +296,11 @@ pub enum Command {
         track_id: Option<String>,
         /// When `track_id` is None and this is true, the clip lands on the
         /// first free lane *above* the highest one occupied over its span,
-        /// minting a new lane at the top when every one above is taken. Set
-        /// by the caption run so captions sit over the video rather than
-        /// under it; a plain title leaves it false and keeps the old
-        /// bottom-first behaviour. Ignored when `track_id` names a track.
+        /// minting a new lane at the top when every one above is taken.
+        /// What the editor sets for a caption and for a title alike, so
+        /// words sit over the video rather than under it; false keeps the
+        /// bottom-first walk of [`Command::AddClipAtFirstFree`]. Ignored
+        /// when `track_id` names a track.
         #[serde(default)]
         above: bool,
         /// Timeline position in seconds, floored at 0.
@@ -339,15 +342,6 @@ pub enum Command {
         clip_id: String,
         /// The curve, or None for a constant rate at the current mean.
         curve: Option<Vec<SpeedPoint>>,
-    },
-    /// Sets or clears the animation on one slot of a clip.
-    SetClipAnimation {
-        /// The clip.
-        clip_id: String,
-        /// Which end, or the whole.
-        slot: AnimationSlot,
-        /// The shape and its seconds, or None to take it off.
-        animation: Option<ClipAnimation>,
     },
     /// Puts a key on one property at one point of a clip, replacing
     /// whichever key on that property was already within a hair of it.
@@ -481,19 +475,25 @@ pub enum Command {
         /// The cut point, in timeline seconds.
         time: f64,
     },
-    /// Points a clip at another file - the enhanced copy of its media -
-    /// adding the file to the bin first when it is not there. The clip's
-    /// in-point, length, looks and name are kept: the copy stands in for
-    /// the original frame for frame, at the same rate and length. The bin
-    /// keeps the original, since other clips may show it and undo may
-    /// want it back. An unknown clip is a no-op.
+    /// Points a clip at another file - the enhanced or reversed copy of
+    /// its media - adding the file to the bin first when it is not there.
+    /// The clip's length, looks and name are kept, and its in-point unless
+    /// `source_start` moves it: an enhanced copy stands in for the original
+    /// frame for frame, a reversed one covers the span the clip showed and
+    /// starts at its own zero. The bin keeps the original, since other
+    /// clips may show it and undo may want it back. An unknown clip is a
+    /// no-op.
     ReplaceClipMedia {
         /// The clip to re-point.
         clip_id: String,
         /// The probed copy, as described by the host.
         item: NewMedia,
+        /// A new in-point in the copy, in seconds, floored at 0. Absent
+        /// keeps the clip's.
+        #[serde(default)]
+        source_start: Option<f64>,
     },
-    /// CapCut-style freeze at `time`: splits `clip_id`, inserts a still of
+    /// A freeze frame at `time`: splits `clip_id`, inserts a still of
     /// `duration` on the same track, and ripples later clips on that track
     /// by `duration`. Video needs a probed `still` (host-extracted jpg);
     /// image clips may omit it and reuse their media. Audio and text are
@@ -528,7 +528,7 @@ pub enum Command {
         /// that starts after a removed span moves left by the length of the
         /// removed spans before it. A track the deletion never touched
         /// stays where it is, so a picture going from one lane does not
-        /// pull the sound on another - CapCut's magnetic track, which is
+        /// pull the sound on another - the magnetic track, which is
         /// what was asked for. False leaves the hole.
         /// https://github.com/jub0t/Concat/issues/106
         #[serde(default)]
@@ -890,9 +890,6 @@ impl Command {
                 .iter()
                 .flatten()
                 .flat_map(|point| [point.at, point.speed])),
-            Command::SetClipAnimation { animation, .. } => {
-                bad(animation.iter().map(|animation| animation.duration))
-            }
             Command::SetClipKey {
                 at, value, ease, ..
             }
@@ -908,7 +905,9 @@ impl Command {
             Command::TrimClip { delta, .. } => bad([*delta]),
             Command::SplitClips { time, .. } => bad([*time]),
             Command::FreezeFrame { time, duration, .. } => bad([*time]) || bad(*duration),
-            Command::ReplaceClipMedia { item, .. } => bad(item.duration) || bad(item.frame_rate),
+            Command::ReplaceClipMedia {
+                item, source_start, ..
+            } => bad(item.duration) || bad(item.frame_rate) || bad(*source_start),
             Command::UpdateClip { patch, .. } => {
                 bad(patch.volume)
                     || bad(patch.fade_in)
@@ -1027,7 +1026,6 @@ pub fn apply(
         | Command::SetClipSpeed { .. }
         | Command::SetClipCutout { .. }
         | Command::AddCutoutStroke { .. }
-        | Command::SetClipAnimation { .. }
         | Command::SetClipKey { .. }
         | Command::ClearClipKey { .. }
         | Command::ClearClipKeys { .. }

@@ -49,6 +49,7 @@ graph BT
     host --> export
     host --> text
     speech --> host
+    speech --> media
     api --> host
     server --> api
     cli --> server
@@ -140,8 +141,13 @@ At load, `concat-effects/src/shader.rs` stitches the host's prelude round the
 package body, parses and validates it with naga, reads the `Params` layout for
 the uniform buffer, and refuses a shader that binds anything the host did not
 declare or loops without a break. A look-up table larger than 65 a side is
-refused too. The GPU compositor can run a package once on a sixteen-pixel
-picture against a timeout (`WgpuCompositor::trial`) before it is enabled.
+refused too, and a binding declared as anything other than what the host
+puts there, and a chain that names a file other than its own `{lut}`. When
+the window loads the user's packages it runs each one's shader once on the
+GPU over a 512-pixel picture against a three-second timeout
+(`Catalogue::install_with`, `WgpuCompositor::trial_at`) and leaves out one
+that fails; a pipeline the driver refuses at draw time is caught in an
+error scope and the pass skipped, never an uncaptured error.
 
 ## 4. Decoding, caching and scheduling
 
@@ -224,9 +230,16 @@ sequenceDiagram
   device (`concat/src/gpu.rs`), so a frame is a texture Slint samples with no
   readback. Drawing happens on the event-loop thread only; decoding on a
   worker.
-- **The launch screen** (`concat/ui/start.slint`) takes three shapes by
-  width: recents beside the form, under it, or the phone shape with stacked
-  labels and full-width controls.
+- **The launch screen** (`concat/ui/start.slint`) is a launcher: a rail of
+  verbs, and beside it the projects this machine has opened, as a grid
+  whose first card starts a new one. The new-project form is a sheet over
+  the window, `NewProjectDialog`, held at the window root with the other
+  sheets and opened by that card or the rail's first verb. The screen takes
+  three shapes by width — the rail with its words, the rail as icons only,
+  or the phone shape, where the rail's verbs sit beside the heading and the
+  sheet's labels sit over their values. The form's frame is a shape and a
+  size rather than a fixed list; `frame_size` in `studio.rs` is the one
+  place that turns the pair into pixels.
 
 ## 6. The document, undo and the file
 
@@ -251,7 +264,8 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    window["the window"] --> api
+    window["the window"] -- "Remote page: embeds a server" --> hub
+    window -- "its own Session" --> host
     cli["concat-cli"] --> api
     json["JSON-RPC lines<br/>TCP or a Unix socket"] --> hub
     grpc["gRPC (feature)"] --> hub
@@ -265,11 +279,20 @@ comparison is constant-time. `version` reports `capabilities` so a client can
 tell what a build serves before calling. The CLI prints the token it serves
 with; the window's Remote page shows it.
 
+The window is not a client of its own API. Its Remote page embeds a
+server whose `Api` has sessions of its own; what the two share is the
+export slot, so one export at a time holds across them, and a register
+of open project folders (`concat_api::OpenProjects`), so neither opens
+a folder the other is editing. The API writes only under its roots
+(`Config::roots`, the home folder by default) and bounds what a caller
+may ask for; the JSON transport caps line length, connections and the
+time to present a token.
+
 ## 8. Testing and measuring
 
 | Suite | Where | What it holds |
 |---|---|---|
-| Unit tests, 429 across 75 files | every crate | the arithmetic, the commands, the reader, the plan |
+| Unit tests (`cargo test --workspace` prints the count) | every crate | the arithmetic, the commands, the reader, the plan |
 | Export end to end | `concat-host/tests/export.rs` | every edit a person can make exports, through real `Session` commands over synthetic media, read back; crashes hard on purpose |
 | Parity | `concat-render/src/gpu/tests.rs` | the GPU against the CPU reference by SSIM, one plan per feature |
 | Hostile packages | `concat-effects/src/shader.rs` tests | the unbounded loop, the extra binding, the oversized table are refused |
@@ -302,9 +325,31 @@ with; the window's Remote page shows it.
   into the decoder's chain, not through the plan.
 - `ExportClip` remains the CLI and API wire type and the title rasteriser's
   output.
-- Cached frames are uploaded to the GPU per composite; keeping them as
-  textures in the pool is the follow-up now that both compositors read a plan.
+- Cached frames are uploaded to the GPU again unless they were drawn in the
+  previous composite (`WgpuCompositor::upload` reuses a texture by frame id);
+  a source-texture cache with its own budget, so a scrub back over cached
+  ground skips the upload too, is the follow-up now that both compositors
+  read a plan. The frame pool is `concat-media/src/pool.rs`.
 - Zero-copy hardware frames (IOSurface into wgpu) are not done; a hardware
-  frame is transferred to memory first.
-- Filmstrips are one image per clip; one texture per track per zoom level is
-  not done, and the Slint repaint itself is not measured headless.
+  frame is transferred to memory first, and the libavfilter stage between
+  the download and the upload (rotation, fit, crop, colour range, RGBA) would
+  have to move to the GPU with it.
+- The preview resolves transitions with fades off, so fade-black, fade-white
+  and the wipes are absent from the monitor until they come through the plan.
+- Filmstrips are one image per media item drawn as up to 120 tile images per
+  clip, and waveforms one path per clip drawn twice; one texture per track
+  per zoom level is not done, and the Slint repaint itself is not measured
+  (`SLINT_DEBUG_PERFORMANCE` needs the window).
+- Enhance runs one restoration model (`concat-vision/src/enhance.rs`) through
+  ONNX Runtime on every platform. The OS scalers (VideoToolbox's
+  `VTFrameProcessor` on macOS 26 and iOS 26, the Windows App SDK's video
+  super-resolution) belong behind the same enhanced-copy job as a per-platform
+  fast path at its per-frame step (`concat-host/src/enhance.rs`, the
+  `enhancer.enhance` call), never as a second feature. Frame interpolation
+  does not fit that step: it changes the frame count and the encoder's rate.
+- A package's `[[wgsl.pass]]` list (`target`, `size` over `WIDTH` and
+  `HEIGHT`; `concat-effects/src/manifest.rs`) is parsed and never read:
+  `run_passes` (`concat-render/src/gpu.rs`) runs one pass per applied effect
+  at the source's size, with no named intermediates. Wiring it up is what a
+  GPU upscaler package (FSR 1.0, Anime4K, both MIT with WGSL ports) needs to
+  write a larger picture than it reads.

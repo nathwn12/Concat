@@ -18,9 +18,9 @@ and on [Discord](https://discord.gg/DVuPfpXfqP).
 ## Before you write code
 
 Open an issue or drop into Discord first for anything beyond a small fix. Large
-areas of [`ROADMAP.MD`](ROADMAP.MD) are already in progress or intentionally
-deferred, and it is genuinely no fun to review a big PR that has to be turned
-down for reasons that were invisible from outside.
+areas are already in progress or intentionally deferred, and it is genuinely
+no fun to review a big PR that has to be turned down for reasons that were
+invisible from outside.
 
 ## Setting up
 
@@ -40,7 +40,6 @@ Slint UI - is one Cargo workspace under `src/`.
 | Path | What lives there |
 |---|---|
 | `src/crates/` | The engine (core, media, render, export, project), the host layer (`concat-host`, `concat-speech`), the CLI, and `concat`, the Slint editor window |
-| `test/` | Media and analysis fixtures |
 
 [`src/README.md`](src/README.md) explains how the crates fit together and
 where the sharp edges are. Read it before touching the engine.

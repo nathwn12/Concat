@@ -10,6 +10,7 @@ import { ConfigPane } from "config-pane.slint";
 import { MediaPane } from "media-pane.slint";
 import { PreviewPane } from "preview-pane.slint";
 import { TimelinePane } from "timeline-pane.slint";
+import { KeyframesPane } from "keyframes-pane.slint";
 
 // One box of the workspace, showing whichever view its `kind` names.
 //
@@ -97,6 +98,8 @@ export component Seat inherits Rectangle {
             count-video: Editor.media-count-video;
             count-audio: Editor.media-count-audio;
             count-images: Editor.media-count-images;
+            count-speech: Editor.media-count-speech;
+            count-processed: Editor.media-count-processed;
             selected-count: Editor.media-selected-count;
             importing: Editor.importing;
 
@@ -115,6 +118,11 @@ export component Seat inherits Rectangle {
             remove(id) => { Editor.media-remove(id); }
             remove-selected => { Editor.media-remove-selected(); }
             activate(id) => { Editor.media-activate(id); }
+            context(id) => { Editor.media-context(id); }
+            menu-items: Editor.menu-items;
+            menu-height: Editor.menu-height;
+            menu-token: Editor.menu-token;
+            menu-selected(id) => { Editor.menu-selected(id); }
 
             presets: Editor.text-presets;
             catalogue-effects: Editor.catalogue-effects;
@@ -288,6 +296,23 @@ export component Seat inherits Rectangle {
         }
     }
 
+    if root.kind == PaneKind.keyframes: KeyframesPane {
+            x: 0;
+            y: 0;
+            width: root.width;
+            height: root.height;
+
+            pane-picked(kind) => { root.picked(kind); }
+            pane-seat: root.index;
+            pane-removable: Editor.seats.length > 1;
+            pane-removed => { root.removed(); }
+
+            selected: Editor.selected-clip;
+            clip-set(field, value) => { Editor.clip-set(field, value); }
+            adjust-set(key, value) => { Editor.adjust-set(key, value); }
+            clip-commit => { Editor.clip-commit(); }
+    }
+
     if root.kind == PaneKind.timeline: TimelinePane {
             x: 0;
             y: 0;
@@ -303,16 +328,23 @@ export component Seat inherits Rectangle {
             current-tab: Editor.timeline-current-tab;
             tracks: Editor.tracks;
             clips: Editor.clips;
+            key-marks: Editor.key-marks;
             tool: Editor.tool;
             snap: Editor.snap;
             magnetic: Editor.magnetic;
             pan-mode: Editor.pan-mode;
+            trim-follow: Editor.trim-follow;
+            preview-axis: Editor.preview-axis;
+            preview-axis-audio: Editor.preview-axis-audio;
             selected-count: Editor.selected-count;
             can-undo: Editor.can-undo;
             can-redo: Editor.can-redo;
             merge-blocked-because: Editor.merge-blocked-because;
             sound-selected: Editor.sound-selected;
             title-selected: Editor.title-selected;
+            picture-selected: Editor.picture-selected;
+            freezable: Editor.freezable;
+            reversible: Editor.reversible;
             playhead: Editor.playhead;
             frame-rate: Editor.frame-rate;
             scroll-left: Editor.scroll-left;
@@ -327,6 +359,12 @@ export component Seat inherits Rectangle {
             snap-changed(snap) => { Editor.snap-changed(snap); }
             magnetic-changed(on) => { Editor.magnetic-changed(on); }
             pan-changed(on) => { Editor.pan-changed(on); }
+            trim-follow-changed(on) => { Editor.trim-follow-changed(on); }
+            preview-axis-changed(on) => { Editor.preview-axis-changed(on); }
+            preview-axis-audio-changed(on) => { Editor.preview-axis-audio-changed(on); }
+            clip-verb(action) => { Editor.shortcut(action); }
+            hovered(seconds) => { Editor.hovered(seconds); }
+            hover-ended => { Editor.hover-ended(); }
             undo => { Editor.undo(); }
             redo => { Editor.redo(); }
             split => { Editor.split(); }
@@ -339,6 +377,7 @@ export component Seat inherits Rectangle {
             zoom(factor, anchor) => { Editor.zoom(factor, anchor); }
             lanes-resized(width) => { Editor.lanes-resized(width); }
             floor-pressed => { Editor.blur(); }
+            key-mark-moved(from, to) => { Editor.key-mark-moved(from, to); }
             scrubbed(seconds) => {
                 Editor.blur();
                 Editor.scrubbed(seconds);
